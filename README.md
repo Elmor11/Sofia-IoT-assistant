@@ -18,6 +18,13 @@ reconocimiento de voz, el modelo de IA y la voz, y la placa reproduce la respues
   1. *Paso 1/2*: te pide conectarte a la red Wi‑Fi (hotspot) de la placa.
   2. *Paso 2/2*: cuando un dispositivo se une a esa red, muestra la URL de la página de
      configuración.
+- **Puente de música por BLE** (`CONFIG_MUSIC_BRIDGE_BLE`): las órdenes de voz (poner, pausar,
+  siguiente, volumen) se envían por Bluetooth de bajo consumo a una app Android, y la pantalla
+  muestra un reproductor (título, artista, barra de progreso) mientras suena algo. Protocolo
+  completo en [docs/music-bridge.md](docs/music-bridge.md).
+- **Configuración Wi‑Fi con código QR** (pantalla 128x64): la placa muestra un QR que la app escanea
+  para enviarle la red por BLE con cifrado AES‑128‑GCM. Si la pantalla no puede mostrar el QR
+  (128x32), se usa el hotspot de las dos fases.
 - **Validación de longitud** de las tramas binarias v2 y v3 del protocolo WebSocket, para descartar
   paquetes mal formados.
 
@@ -88,8 +95,9 @@ Docker en Windows). El resultado queda en `build/`; el archivo que se graba ente
 
 ## Primer uso
 
-1. **Wi‑Fi.** Si la placa no tiene una red guardada, entra en modo de configuración:
-   *Paso 1/2* te indica la red Wi‑Fi de la placa a la que conectarte desde el móvil o el PC;
+1. **Wi‑Fi.** Si la placa no tiene una red guardada, entra en modo de configuración. Con la
+   pantalla 128x64 y la app complementaria, muestra un QR: escanéalo con la app y envía la red
+   (ver [docs/music-bridge.md](docs/music-bridge.md)). Si no, usa el hotspot: *Paso 1/2* te indica la red Wi‑Fi de la placa a la que conectarte desde el móvil o el PC;
    al conectarte pasa a *Paso 2/2* con la URL de configuración (normalmente `http://192.168.4.1`).
    Elige tu red y su contraseña. Si la página dice "Failed to fetch" justo al conectar, es normal:
    la red de configuración se apaga cuando la placa pasa a conectarse a tu Wi‑Fi.
@@ -137,13 +145,15 @@ grabada, busca la línea `Compile time` al arrancar.
   variante 128x32 compila pero no está probada en hardware.
 - Compilar correctamente no equivale a validar en hardware. Los cambios de audio y red necesitan
   pruebas físicas.
-- Sin PSRAM: no hay palabra de activación ni AEC, y la memoria libre es limitada.
+- Sin PSRAM: no hay palabra de activación ni AEC, y la memoria libre es limitada. Wi‑Fi y BLE a la
+  vez dejan poca RAM; revisa `free sram` en el log tras compilar.
+- El puente de música y el QR de Wi‑Fi compilan, pero no se han probado en hardware con una app real.
 
 ## Ideas futuras
 
 - Más comportamientos de los ojos en reposo (bostezo, sueño, sobresalto).
-- Reproductor de música en pantalla (título, barra de progreso y controles), con una app
-  Android complementaria conectada por Bluetooth de bajo consumo.
+- App Android complementaria que implemente el protocolo de [docs/music-bridge.md](docs/music-bridge.md)
+  (el firmware ya está; la app aún no está en este repositorio).
 - Herramientas del dispositivo (MCP local) para controlar brillo, volumen o hardware extra.
 
 ## Créditos y licencia

@@ -32,6 +32,11 @@ protected:
     void StartWifiConfigMode();
 
     /**
+     * Enter WiFi configuration mode through the hotspot (or BluFi)
+     */
+    void StartHotspotConfigMode();
+
+    /**
      * WiFi connection timeout callback
      */
     static void OnWifiConnectTimeout(void* arg);

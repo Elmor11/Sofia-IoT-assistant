@@ -19,6 +19,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
             "display/oled_eyes.cc"
+            "display/oled_music.cc"
             "display/lvgl_display/lvgl_display.cc"
             "display/emote_display.cc"
             "display/lvgl_display/emoji_collection.cc"
@@ -963,6 +964,9 @@ endif()
 # Auto Select Additional Sources
 if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
     list(APPEND SOURCES "boards/common/blufi.cpp")
+endif ()
+if (CONFIG_MUSIC_BRIDGE_BLE)
+    list(APPEND SOURCES "music/music_bridge.cc")
 endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)

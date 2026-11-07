@@ -3,6 +3,7 @@
 
 #include "lvgl_display.h"
 #include "oled_eyes.h"
+#include "oled_music.h"
 
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -23,8 +24,14 @@ private:
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* emotion_label_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
+#if CONFIG_LV_USE_QRCODE
+    lv_obj_t* qr_panel_ = nullptr;
+    lv_obj_t* qr_code_ = nullptr;
+    lv_obj_t* qr_caption_ = nullptr;
+#endif
 #if CONFIG_OLED_REACTIVE_EYES
     std::unique_ptr<OledEyes> eyes_;
+    std::unique_ptr<OledMusicPanel> music_;
     lv_timer_t* layout_timer_ = nullptr;
     bool text_mode_ = false;      // text is wanted, eyes are (shrinking to) the compact box
     bool text_ui_shown_ = false;  // chat text is visible
@@ -51,8 +58,13 @@ public:
     virtual void RemoveChatMessage(const char* role, const char* content) override;
 #if CONFIG_OLED_REACTIVE_EYES
     virtual void ClearChatMessages() override;
+    virtual void SetNowPlaying(const char* title, const char* artist, int64_t position_ms,
+                               int64_t duration_ms, int state) override;
 #endif
     virtual bool SetEmotion(const char* emotion) override;
+#if CONFIG_LV_USE_QRCODE
+    virtual bool SetPairingQr(const char* payload, const char* caption) override;
+#endif
     virtual void SetTheme(Theme* theme) override;
     virtual bool IsMonochrome() const override { return true; }
     void SetPowerSaveMode(bool on) override;

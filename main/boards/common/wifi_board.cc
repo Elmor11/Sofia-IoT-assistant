@@ -22,6 +22,9 @@
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "blufi.h"
 #endif
+#if CONFIG_MUSIC_BRIDGE_BLE
+#include "music/music_bridge.h"
+#endif
 
 static const char *TAG = "WifiBoard";
 
@@ -173,6 +176,22 @@ void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
     // Transition to wifi configuring state
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
+#if CONFIG_MUSIC_BRIDGE_BLE
+    // Preferred: a QR code on the display that the phone app scans, then BLE provisioning. The
+    // hotspot is the fallback when the display cannot show a QR code.
+    Application::GetInstance().Schedule([this]() {
+        auto& bridge = MusicBridge::GetInstance();
+        bridge.Start();
+        if (!bridge.BeginWifiProvisioning()) {
+            StartHotspotConfigMode();
+        }
+    });
+#else
+    StartHotspotConfigMode();
+#endif
+}
+
+void WifiBoard::StartHotspotConfigMode() {
 #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 

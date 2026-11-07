@@ -797,6 +797,16 @@ config OLED_REACTIVE_EYES
         (happy, sad, angry, surprised, ...), blink and glance around. Alert icons
         still replace the eyes while they are shown.
 
+config MUSIC_BRIDGE_BLE
+    bool "Music bridge with the phone over BLE"
+    default n
+    select BT_ENABLED
+    help
+        Lets voice commands control the music playing on a phone running the
+        companion app, and shows the playing track on the OLED player.
+        Needs the NimBLE host (CONFIG_BT_NIMBLE_ENABLED=y), a BLE-capable
+        chip and enough free RAM. See docs/music-bridge.md.
+
 
 choice DISPLAY_LCD_TYPE
     depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_WDMOMO_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || (BOARD_TYPE_WK_ESP32S3_DEV && WK_ESP32S3_DEV_DISPLAY_LCD)

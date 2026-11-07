@@ -106,6 +106,8 @@ void OledDisplay::SetupUI() {
     // Eyes fill the screen; with text they shrink into the left column next to it.
     int top = (height_ == 64) ? 16 : 0;
     eyes_ = std::make_unique<OledEyes>(lv_screen_active(), 0, top, 32, height_ - top);
+    // The music player takes the space to the right of the compact eyes.
+    music_ = std::make_unique<OledMusicPanel>(lv_screen_active(), 36, 0, width_ - 36, height_);
     SetTextUiVisible(false, false);
     layout_timer_ = lv_timer_create(OnLayoutTimer, 100, this);
 #endif
@@ -154,9 +156,12 @@ void OledDisplay::UpdateEyesLayout() {
     bool icon_alert = !eyes_->IsVisible();
     bool needs_text = chat_visible || notification_visible || icon_alert;
     bool needs_status = notification_visible || icon_alert;
+    bool music_active = music_ != nullptr && music_->Active();
+    // The eyes stay in the compact box while text or the music player needs the space.
+    bool needs_compact = needs_text || music_active;
 
     uint32_t now = lv_tick_get();
-    if (needs_text) {
+    if (needs_compact) {
         text_idle_since_ms_ = 0;
         if (!text_mode_) {
             text_mode_ = true;
@@ -176,10 +181,74 @@ void OledDisplay::UpdateEyesLayout() {
 
     // Show the text once the eyes have mostly shrunk out of its way. Alert icons replace the
     // eyes, so there is nothing to wait for then.
-    if (text_mode_ && (!text_ui_shown_ || status_shown_ != needs_status) &&
-        (eyes_->CompactProgress() >= 0.6f || icon_alert)) {
-        SetTextUiVisible(true, needs_status);
+    bool eyes_clear = eyes_->CompactProgress() >= 0.6f;
+    if (text_mode_ && needs_text) {
+        if ((!text_ui_shown_ || status_shown_ != needs_status) && (eyes_clear || icon_alert)) {
+            SetTextUiVisible(true, needs_status);
+        }
+    } else if (text_ui_shown_ && music_active) {
+        SetTextUiVisible(false, false);
     }
+
+    // Alerts and notifications win over the player; it comes back when they are gone.
+    if (music_ != nullptr) {
+        bool show_music = text_mode_ && !needs_text && music_active && eyes_clear;
+        if (music_->IsShown() != show_music) {
+            music_->Show(show_music);
+        }
+        if (show_music) {
+            music_->Tick();
+        }
+    }
+}
+
+void OledDisplay::SetNowPlaying(const char* title, const char* artist, int64_t position_ms,
+                                int64_t duration_ms, int state) {
+    DisplayLockGuard lock(this);
+    if (music_ != nullptr) {
+        music_->SetTrack(title, artist, position_ms, duration_ms, state);
+    }
+}
+#endif
+
+#if CONFIG_LV_USE_QRCODE
+bool OledDisplay::SetPairingQr(const char* payload, const char* caption) {
+    // A version 2 QR code needs 64 px of height to stay readable on this screen.
+    if (height_ < 64 || payload == nullptr) {
+        return false;
+    }
+    DisplayLockGuard lock(this);
+    if (qr_panel_ == nullptr) {
+        qr_panel_ = lv_obj_create(lv_screen_active());
+        lv_obj_remove_style_all(qr_panel_);
+        lv_obj_set_size(qr_panel_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_set_pos(qr_panel_, 0, 0);
+        lv_obj_set_style_bg_color(qr_panel_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(qr_panel_, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_SCROLLABLE);
+
+        // Black modules on a white background, which is what phone cameras expect.
+        qr_code_ = lv_qrcode_create(qr_panel_);
+        lv_qrcode_set_size(qr_code_, 64);
+        lv_qrcode_set_dark_color(qr_code_, lv_color_black());
+        lv_qrcode_set_light_color(qr_code_, lv_color_white());
+        lv_qrcode_set_quiet_zone(qr_code_, true);
+        lv_obj_align(qr_code_, LV_ALIGN_LEFT_MID, 0, 0);
+
+        qr_caption_ = lv_label_create(qr_panel_);
+        lv_obj_set_width(qr_caption_, width_ - 68);
+        lv_label_set_long_mode(qr_caption_, LV_LABEL_LONG_WRAP);
+        lv_obj_align(qr_caption_, LV_ALIGN_LEFT_MID, 68, 0);
+    }
+    if (lv_qrcode_update(qr_code_, payload, strlen(payload)) != LV_RESULT_OK) {
+        ESP_LOGE(TAG, "QR code does not fit: %s", payload);
+        return false;
+    }
+    lv_label_set_text(qr_caption_, caption != nullptr ? caption : "");
+    lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(qr_panel_);
+    return true;
 }
 #endif
 
@@ -191,6 +260,7 @@ OledDisplay::~OledDisplay() {
             lv_timer_delete(layout_timer_);
             layout_timer_ = nullptr;
         }
+        music_.reset();
         eyes_.reset();
     }
 #endif

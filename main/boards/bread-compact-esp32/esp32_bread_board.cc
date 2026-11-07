@@ -8,6 +8,9 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "display/oled_display.h"
+#if CONFIG_MUSIC_BRIDGE_BLE
+#include "music/music_bridge.h"
+#endif
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -130,6 +133,10 @@ private:
     // 物联网初始化，添加对 AI 可见设备
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
+#if CONFIG_MUSIC_BRIDGE_BLE
+        // BLE and the voice tools start once the board is fully built.
+        Application::GetInstance().Schedule([]() { MusicBridge::GetInstance().Start(); });
+#endif
     }
 
 public:

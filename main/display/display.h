@@ -23,6 +23,9 @@
 class LvglFont;
 class LvglImage;
 
+// Playback state reported by the phone's music app.
+enum MusicPlaybackState { kMusicPaused = 0, kMusicPlaying = 1, kMusicStopped = 2 };
+
 class Theme {
 public:
     Theme(const std::string& name) : name_(name) {}
@@ -52,6 +55,14 @@ public:
     // Remove a matching message without clearing newer content, when supported.
     virtual void RemoveChatMessage(const char* role, const char* content) {}
     virtual void ClearChatMessages();
+    // Track playing on the phone. position_ms is the position at the time of the call; displays
+    // that draw a player advance it on their own while the state is kMusicPlaying. Ignored by
+    // displays without a player.
+    virtual void SetNowPlaying(const char* title, const char* artist, int64_t position_ms,
+                               int64_t duration_ms, int state) {}
+    // Shows a full-screen QR code with a short caption (for Wi-Fi provisioning with the phone
+    // app). Returns false when the display cannot show a scannable QR code.
+    virtual bool SetPairingQr(const char* payload, const char* caption) { return false; }
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
