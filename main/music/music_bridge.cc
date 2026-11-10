@@ -36,6 +36,9 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "store/config/ble_store_config.h"
 
+// Defined by NimBLE but missing from its header; the ESP-IDF examples declare it the same way.
+extern "C" void ble_store_config_init(void);
+
 #define TAG "MusicBridge"
 
 namespace {
@@ -103,7 +106,14 @@ int GapEvent(struct ble_gap_event* event, void* arg) {
     auto& bridge = MusicBridge::GetInstance();
     switch (event->type) {
         case BLE_GAP_EVENT_CONNECT:
+            ESP_LOGI(TAG, "GAP connect status=%d", event->connect.status);
             if (event->connect.status == 0) {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0) {
+                    ESP_LOGI(TAG, "Link: peer addr type=%d itvl=%d latency=%d timeout=%d",
+                             desc.peer_id_addr.type, desc.conn_itvl, desc.conn_latency,
+                             desc.supervision_timeout);
+                }
                 bridge.OnConnected(event->connect.conn_handle);
                 // Ask the phone to encrypt the link; the state characteristic needs it. While
                 // setting up Wi-Fi the credentials are already encrypted, so skip the pairing.
@@ -115,6 +125,8 @@ int GapEvent(struct ble_gap_event* event, void* arg) {
             }
             break;
         case BLE_GAP_EVENT_DISCONNECT:
+            // Host-side reason; 0x200 + HCI code (e.g. 0x208 timeout, 0x213 remote user, 0x23e failed)
+            ESP_LOGW(TAG, "Disconnect reason=0x%x", event->disconnect.reason);
             bridge.OnDisconnected();
             bridge.Advertise();
             break;
@@ -328,7 +340,8 @@ void MusicBridge::LoadIdentity() {
     }
 }
 
-bool MusicBridge::BeginWifiProvisioning() {
+bool MusicBridge::BeginWifiProvisioning(const char* caption) {
+    qr_caption_ = caption != nullptr ? caption : "Escanea el\nQR con la\napp Sofia";
     if (device_name_.empty()) {
         return false;  // Start() has not run (or failed)
     }
@@ -336,13 +349,22 @@ bool MusicBridge::BeginWifiProvisioning() {
     std::string payload = "SF" + device_name_.substr(device_name_.size() - 4) + secret_hex_;
     auto display = Board::GetInstance().GetDisplay();
     if (display == nullptr ||
-        !display->SetPairingQr(payload.c_str(), "Escanea el\nQR con la\napp Sofia")) {
+        !display->SetPairingQr(payload.c_str(), qr_caption_.c_str())) {
         return false;
     }
+    qr_payload_ = payload;
     bad_attempts_ = 0;
     provisioning_ = true;
     ESP_LOGI(TAG, "Waiting for Wi-Fi credentials from the phone app (%s)", device_name_.c_str());
     return true;
+}
+
+// Changes the text next to the QR code (the QR itself stays the same).
+void MusicBridge::ShowProvisionCaption(const char* caption) {
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr && !qr_payload_.empty()) {
+        display->SetPairingQr(qr_payload_.c_str(), caption);
+    }
 }
 
 void MusicBridge::NotifyProvisioning(const char* json) {
@@ -413,6 +435,7 @@ void MusicBridge::OnProvisionWrite(const uint8_t* data, size_t length) {
     if (!DecryptCredentials(data, length, json)) {
         ++bad_attempts_;
         ESP_LOGW(TAG, "Wi-Fi credentials rejected (%d/%d)", bad_attempts_.load(), kMaxBadAttempts);
+        ShowProvisionCaption("QR no valido\nEscanealo\nde nuevo");
         NotifyProvisioning("{\"w\":\"bad_key\"}");
         return;
     }
@@ -429,6 +452,7 @@ void MusicBridge::OnProvisionWrite(const uint8_t* data, size_t length) {
     std::string password_value = password != nullptr ? password->valuestring : "";
     provisioning_ = false;
     NotifyProvisioning("{\"w\":\"saved\"}");
+    ShowProvisionCaption("Red guardada\nReiniciando...");
     ESP_LOGI(TAG, "Wi-Fi \"%s\" received, restarting", ssid_value.c_str());
 
     Application::GetInstance().Schedule([ssid_value, password_value]() {
@@ -492,6 +516,9 @@ void MusicBridge::OnConnected(uint16_t conn_handle) {
     encrypted_ = false;
     subscribed_ = false;
     connected_ = true;
+    if (provisioning_) {
+        ShowProvisionCaption("Telefono\nconectado\nEnviando red...");
+    }
 }
 
 void MusicBridge::OnDisconnected() {
@@ -499,6 +526,9 @@ void MusicBridge::OnDisconnected() {
     connected_ = false;
     encrypted_ = false;
     subscribed_ = false;
+    if (provisioning_) {
+        ShowProvisionCaption(qr_caption_.c_str());
+    }
     // Nothing can be playing as far as the device knows.
     ShowNowPlaying("", "", 0, 0, kMusicStopped);
 }
@@ -537,6 +567,8 @@ bool MusicBridge::SendCommand(const std::string& json) {
 }
 
 void MusicBridge::OnStateWrite(const uint8_t* data, size_t length) {
+    ESP_LOGI(TAG, "State write: %u bytes: %.*s", static_cast<unsigned>(length),
+             static_cast<int>(length > 120 ? 120 : length), reinterpret_cast<const char*>(data));
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         cJSON_ParseWithLength(reinterpret_cast<const char*>(data), length), cJSON_Delete);
     if (!root || !cJSON_IsObject(root.get())) {

@@ -211,41 +211,102 @@ void OledDisplay::SetNowPlaying(const char* title, const char* artist, int64_t p
 }
 #endif
 
-#if CONFIG_LV_USE_QRCODE
+#if CONFIG_MUSIC_BRIDGE_BLE
+// The QR encoder is the qrcodegen library that is already linked in (esp_emote_gfx bundles it);
+// LVGL's own copy would clash with it, so lv_qrcode is not used.
+extern "C" {
+enum qrcodegen_Ecc { qrcodegen_Ecc_LOW = 0, qrcodegen_Ecc_MEDIUM };
+enum qrcodegen_Mask { qrcodegen_Mask_AUTO = -1 };
+bool qrcodegen_encodeBinary(uint8_t dataAndTemp[], size_t dataLen, uint8_t qrcode[],
+                            enum qrcodegen_Ecc ecl, int minVersion, int maxVersion,
+                            enum qrcodegen_Mask mask, bool boostEcl);
+int qrcodegen_getSize(const uint8_t qrcode[]);
+bool qrcodegen_getModule(const uint8_t qrcode[], int x, int y);
+}
+
+namespace {
+constexpr int kQrBox = 64;     // square the code is drawn in
+constexpr int kQrMaxVersion = 3;
+}  // namespace
+
+void OledDisplay::OnQrDraw(lv_event_t* event) {
+    auto* self = static_cast<OledDisplay*>(lv_event_get_user_data(event));
+    lv_layer_t* layer = lv_event_get_layer(event);
+    lv_area_t area;
+    lv_obj_get_coords(self->qr_code_, &area);
+
+    auto fill = [layer](int x1, int y1, int x2, int y2, lv_color_t color) {
+        lv_draw_rect_dsc_t dsc;
+        lv_draw_rect_dsc_init(&dsc);
+        dsc.bg_color = color;
+        dsc.bg_opa = LV_OPA_COVER;
+        lv_area_t box = {x1, y1, x2, y2};
+        lv_draw_rect(layer, &dsc, &box);
+    };
+    // On this panel lv_color_black() is the LIT pixel (see the screen's text color), so the lit
+    // box with unlit modules is what phone cameras expect: dark code on a bright background.
+    fill(area.x1, area.y1, area.x2, area.y2, lv_color_black());
+
+    int size = qrcodegen_getSize(self->qr_modules_);
+    int scale = kQrBox / (size + 6);  // leaves a quiet zone of about 3 modules per side
+    if (scale < 1) {
+        return;
+    }
+    int margin = (kQrBox - size * scale) / 2;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            if (qrcodegen_getModule(self->qr_modules_, x, y)) {
+                int px = area.x1 + margin + x * scale;
+                int py = area.y1 + margin + y * scale;
+                fill(px, py, px + scale - 1, py + scale - 1, lv_color_white());
+            }
+        }
+    }
+}
+
 bool OledDisplay::SetPairingQr(const char* payload, const char* caption) {
     // A version 2 QR code needs 64 px of height to stay readable on this screen.
-    if (height_ < 64 || payload == nullptr) {
+    if (height_ < kQrBox || payload == nullptr) {
         return false;
     }
+    uint8_t scratch[sizeof(qr_modules_)] = {};
+    size_t length = strlen(payload);
+    if (length > sizeof(scratch)) {
+        return false;
+    }
+    memcpy(scratch, payload, length);
+    if (!qrcodegen_encodeBinary(scratch, length, qr_modules_, qrcodegen_Ecc_MEDIUM, 1,
+                                kQrMaxVersion, qrcodegen_Mask_AUTO, true)) {
+        ESP_LOGE(TAG, "QR code does not fit: %s", payload);
+        return false;
+    }
+
     DisplayLockGuard lock(this);
     if (qr_panel_ == nullptr) {
         qr_panel_ = lv_obj_create(lv_screen_active());
         lv_obj_remove_style_all(qr_panel_);
         lv_obj_set_size(qr_panel_, LV_HOR_RES, LV_VER_RES);
         lv_obj_set_pos(qr_panel_, 0, 0);
-        lv_obj_set_style_bg_color(qr_panel_, lv_color_black(), 0);
+        lv_obj_set_style_bg_color(qr_panel_, lv_color_white(), 0);  // white = unlit here
         lv_obj_set_style_bg_opa(qr_panel_, LV_OPA_COVER, 0);
         lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_SCROLLABLE);
 
-        // Black modules on a white background, which is what phone cameras expect.
-        qr_code_ = lv_qrcode_create(qr_panel_);
-        lv_qrcode_set_size(qr_code_, 64);
-        lv_qrcode_set_dark_color(qr_code_, lv_color_black());
-        lv_qrcode_set_light_color(qr_code_, lv_color_white());
-        lv_qrcode_set_quiet_zone(qr_code_, true);
+        qr_code_ = lv_obj_create(qr_panel_);
+        lv_obj_remove_style_all(qr_code_);
+        lv_obj_set_size(qr_code_, kQrBox, kQrBox);
         lv_obj_align(qr_code_, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_remove_flag(qr_code_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(qr_code_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(qr_code_, OnQrDraw, LV_EVENT_DRAW_MAIN, this);
 
         qr_caption_ = lv_label_create(qr_panel_);
         lv_obj_set_width(qr_caption_, width_ - 68);
         lv_label_set_long_mode(qr_caption_, LV_LABEL_LONG_WRAP);
         lv_obj_align(qr_caption_, LV_ALIGN_LEFT_MID, 68, 0);
     }
-    if (lv_qrcode_update(qr_code_, payload, strlen(payload)) != LV_RESULT_OK) {
-        ESP_LOGE(TAG, "QR code does not fit: %s", payload);
-        return false;
-    }
     lv_label_set_text(qr_caption_, caption != nullptr ? caption : "");
+    lv_obj_invalidate(qr_code_);
     lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(qr_panel_);
     return true;

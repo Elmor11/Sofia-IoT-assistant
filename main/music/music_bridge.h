@@ -43,7 +43,7 @@ public:
 
     // Shows the pairing QR code and accepts Wi-Fi credentials from the phone app. False when the
     // display cannot show a QR code (use the hotspot instead). Needs Start() first.
-    bool BeginWifiProvisioning();
+    bool BeginWifiProvisioning(const char* caption = nullptr);
 
 private:
     MusicBridge() = default;
@@ -52,6 +52,9 @@ private:
     void LoadIdentity();
     bool DecryptCredentials(const uint8_t* data, size_t length, std::string& json);
     void NotifyProvisioning(const char* json);
+    void ShowProvisionCaption(const char* caption);
+    std::string qr_payload_;
+    std::string qr_caption_;
     void ShowNowPlaying(const std::string& title, const std::string& artist, int64_t position_ms,
                         int64_t duration_ms, int state);
 

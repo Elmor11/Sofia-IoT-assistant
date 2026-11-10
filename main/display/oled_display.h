@@ -24,10 +24,12 @@ private:
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* emotion_label_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
-#if CONFIG_LV_USE_QRCODE
+#if CONFIG_MUSIC_BRIDGE_BLE
     lv_obj_t* qr_panel_ = nullptr;
     lv_obj_t* qr_code_ = nullptr;
     lv_obj_t* qr_caption_ = nullptr;
+    uint8_t qr_modules_[128] = {};  // qrcodegen output, version 3 at most
+    static void OnQrDraw(lv_event_t* event);
 #endif
 #if CONFIG_OLED_REACTIVE_EYES
     std::unique_ptr<OledEyes> eyes_;
@@ -62,7 +64,7 @@ public:
                                int64_t duration_ms, int state) override;
 #endif
     virtual bool SetEmotion(const char* emotion) override;
-#if CONFIG_LV_USE_QRCODE
+#if CONFIG_MUSIC_BRIDGE_BLE
     virtual bool SetPairingQr(const char* payload, const char* caption) override;
 #endif
     virtual void SetTheme(Theme* theme) override;

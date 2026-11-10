@@ -70,7 +70,8 @@ OledMusicPanel::OledMusicPanel(lv_obj_t* parent, int x, int y, int w, int h)
 
     title_ = lv_label_create(obj_);
     lv_obj_set_width(title_, w);
-    lv_label_set_long_mode(title_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    // Not SCROLL_CIRCULAR: on the device it left taskLVGL spinning in the label draw code.
+    lv_label_set_long_mode(title_, LV_LABEL_LONG_CLIP);
     lv_obj_set_pos(title_, 0, 0);
     lv_label_set_text(title_, "");
 

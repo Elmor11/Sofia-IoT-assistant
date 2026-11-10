@@ -129,7 +129,11 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             Blufi::GetInstance().deinit();
 #endif
             in_config_mode_ = false;
+            connect_failed_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
+            if (auto display = GetDisplay()) {
+                display->ShowNotification(("WiFi conectado: " + data).c_str(), 3000);
+            }
             break;
         case NetworkEvent::Scanning:
             ESP_LOGI(TAG, "WiFi scanning");
@@ -169,6 +173,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
 
     WifiManager::GetInstance().StopStation();
+    board->connect_failed_ = true;
     board->StartWifiConfigMode();
 }
 
@@ -182,7 +187,9 @@ void WifiBoard::StartWifiConfigMode() {
     Application::GetInstance().Schedule([this]() {
         auto& bridge = MusicBridge::GetInstance();
         bridge.Start();
-        if (!bridge.BeginWifiProvisioning()) {
+        // After a failed attempt say so, so a wrong password is not mistaken for a first start.
+        const char* caption = connect_failed_ ? "No pude\nconectar al\nWiFi. Escanea\nde nuevo" : nullptr;
+        if (!bridge.BeginWifiProvisioning(caption)) {
             StartHotspotConfigMode();
         }
     });
