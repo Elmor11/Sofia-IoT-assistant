@@ -843,7 +843,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+        if (!OpenAudioChannelOrRecover()) {
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error)
             SetDeviceState(kDeviceStateIdle);
@@ -852,6 +852,21 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     }
 
     SetListeningMode(mode);
+}
+
+bool Application::OpenAudioChannelOrRecover() {
+    if (protocol_->OpenAudioChannel()) {
+        audio_channel_failures_ = 0;
+        return true;
+    }
+    // The protocol already retries once. Failing again in a row means the network stack is in a
+    // state it does not recover from by itself: restart instead of leaving the device deaf.
+    constexpr int kMaxAudioChannelFailures = 2;
+    if (++audio_channel_failures_ >= kMaxAudioChannelFailures) {
+        ESP_LOGE(TAG, "Audio channel failed %d times in a row, rebooting", audio_channel_failures_);
+        Schedule([this]() { Reboot(); });
+    }
+    return false;
 }
 
 void Application::HandleStartListeningEvent() {
@@ -979,7 +994,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
-        if (!protocol_->OpenAudioChannel()) {
+        if (!OpenAudioChannelOrRecover()) {
             // Return to idle so the device is not stuck in the connecting
             // state (not every failure path reports a network error), and
             // wake word detection is re-enabled by the idle state handler.
@@ -1283,6 +1298,13 @@ void Application::Reboot() {
     audio_service_.Stop();
 
     vTaskDelay(pdMS_TO_TICKS(1000));
+    // Restart while holding the display lock, so no transfer to the panel is cut halfway: an I2C
+    // OLED left mid-transfer keeps the bus stuck and fails to initialize after the restart.
+    auto display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        DisplayLockGuard lock(display);
+        esp_restart();
+    }
     esp_restart();
 }
 

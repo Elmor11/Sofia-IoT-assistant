@@ -20,6 +20,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/oled_display.cc"
             "display/oled_eyes.cc"
             "display/oled_music.cc"
+            "display/oled_pomodoro.cc"
             "display/lvgl_display/lvgl_display.cc"
             "display/emote_display.cc"
             "display/lvgl_display/emoji_collection.cc"
@@ -966,7 +967,12 @@ if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
     list(APPEND SOURCES "boards/common/blufi.cpp")
 endif ()
 if (CONFIG_MUSIC_BRIDGE_BLE)
-    list(APPEND SOURCES "music/music_bridge.cc")
+    list(APPEND SOURCES "music/music_bridge.cc" "music/music_lan.cc")
+endif ()
+if (CONFIG_POMODORO_TIMER)
+    list(APPEND SOURCES "pomodoro/pomodoro.cc")
+    set(POMODORO_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_break.ogg
+                        ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_focus.ogg)
 endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
@@ -1141,7 +1147,7 @@ if(CONFIG_BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD)
     )
 endif()
 idf_component_register(SRCS ${SOURCES}
-                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
+                    EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS} ${POMODORO_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES

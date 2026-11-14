@@ -27,6 +27,7 @@ public:
     bool IsShown() const;
     // False once the phone reported that nothing is playing.
     bool Active() const;
+    bool Playing() const;
     // Advances the progress bar and the time text. Call periodically while shown.
     void Tick();
 

@@ -8,12 +8,22 @@
                 "CONFIG_OLED_SSD1306_128X64=y",
                 "CONFIG_OLED_REACTIVE_EYES=y",
                 "CONFIG_MUSIC_BRIDGE_BLE=y",
+                "CONFIG_POMODORO_TIMER=y",
+                "CONFIG_MCP_TOOLS_LIST_PAGE_SIZE=2000",
                 "CONFIG_BT_NIMBLE_ENABLED=y",
                 "CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y",
                 "CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1",
+                "CONFIG_BTDM_CTRL_BLE_MAX_CONN=1",
+                "CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=8",
+                "CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=8",
+                "CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=8",
+                "CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=12",
+                "CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=4",
                 "CONFIG_BT_NIMBLE_ROLE_CENTRAL=n",
                 "CONFIG_BT_NIMBLE_ROLE_OBSERVER=n",
-                "CONFIG_BT_NIMBLE_NVS_PERSIST=y"
+                "CONFIG_BT_NIMBLE_NVS_PERSIST=y",
+                "CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=y",
+                "CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n"
             ]
         },
         {

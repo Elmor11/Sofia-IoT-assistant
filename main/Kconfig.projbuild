@@ -807,6 +807,24 @@ config MUSIC_BRIDGE_BLE
         Needs the NimBLE host (CONFIG_BT_NIMBLE_ENABLED=y), a BLE-capable
         chip and enough free RAM. See docs/music-bridge.md.
 
+config MCP_TOOLS_LIST_PAGE_SIZE
+    int "MCP tools/list page size (bytes)"
+    default 8000
+    range 1500 16000
+    help
+        Largest tools/list reply. Longer tool lists are split into pages the
+        backend fetches with nextCursor. Each page is copied several times
+        while it is sent, so boards without PSRAM can lower it to avoid
+        running out of memory.
+
+config POMODORO_TIMER
+    bool "Pomodoro study timer"
+    default n
+    help
+        Voice-controlled pomodoro timer (self.pomodoro.* MCP tools) with a chime
+        at every phase change and a 7-day study history in NVS. OLED boards with
+        reactive eyes show it as a gauge. The board registers the tools.
+
 
 choice DISPLAY_LCD_TYPE
     depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_WDMOMO_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || (BOARD_TYPE_WK_ESP32S3_DEV && WK_ESP32S3_DEV_DISPLAY_LCD)

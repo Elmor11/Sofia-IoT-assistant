@@ -515,8 +515,11 @@ void McpServer::ReplyError(int id, const std::string& message,
 
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools,
                              const ResponseSender& response_sender) {
-    const int max_payload_size = 8000;
+    // Each page is copied a few times on its way out (result, JSON-RPC envelope, transport), so
+    // boards without PSRAM use smaller pages; the backend follows nextCursor for the rest.
+    const int max_payload_size = CONFIG_MCP_TOOLS_LIST_PAGE_SIZE;
     std::string json = "{\"tools\":[";
+    json.reserve(max_payload_size);
 
     bool found_cursor = cursor.empty();
     auto it = tools_.begin();

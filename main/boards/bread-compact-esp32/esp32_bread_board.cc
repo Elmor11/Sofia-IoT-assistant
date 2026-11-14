@@ -5,14 +5,16 @@
 #include "button.h"
 #include "config.h"
 #include "mcp_server.h"
+#include "settings.h"
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "display/oled_display.h"
-#if CONFIG_MUSIC_BRIDGE_BLE
-#include "music/music_bridge.h"
+#if CONFIG_POMODORO_TIMER
+#include "pomodoro/pomodoro.h"
 #endif
 
 #include <esp_log.h>
+#include <ssid_manager.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -44,6 +46,8 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
+        // After a reset in the middle of a transfer the OLED can hold SDA low: clock it free.
+        i2c_master_bus_reset(display_i2c_bus_);
     }
 
     void InitializeSsd1306Display() {
@@ -78,9 +82,19 @@ private:
         ESP_ERROR_CHECK(esp_lcd_new_panel_ssd1306(panel_io_, &panel_config, &panel_));
         ESP_LOGI(TAG, "SSD1306 driver installed");
 
-        // Reset the display
-        ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
-        if (esp_lcd_panel_init(panel_) != ESP_OK) {
+        // Reset the display. A panel left mid-transfer by a software restart may not answer the
+        // first time: free the bus and try again before giving up.
+        bool ready = false;
+        for (int attempt = 1; attempt <= 3 && !ready; ++attempt) {
+            ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_));
+            ready = esp_lcd_panel_init(panel_) == ESP_OK;
+            if (!ready) {
+                ESP_LOGW(TAG, "Display init failed (attempt %d/3), resetting the I2C bus", attempt);
+                i2c_master_bus_reset(display_i2c_bus_);
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+        }
+        if (!ready) {
             ESP_LOGE(TAG, "Failed to initialize display");
             display_ = new NoDisplay();
             return;
@@ -104,6 +118,19 @@ private:
             .intr_type = GPIO_INTR_DISABLE      // 禁用中断
         };
         gpio_config(&io_conf);  // 应用配置
+
+        // Hold BOOT for 5 s: forget the Wi-Fi network and the phone link (QR secret and Bluetooth
+        // keys), then reboot into the QR setup. The board identity and activation are kept.
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGW(TAG, "BOOT held: erasing Wi-Fi and phone link");
+            if (display_ != nullptr) {
+                display_->ShowNotification("Borrando conexion...", 5000);
+            }
+            SsidManager::GetInstance().Clear();
+            Settings("sofia_link", true).EraseAll();
+            Settings("nimble_bond", true).EraseAll();
+            Application::GetInstance().Schedule([]() { Application::GetInstance().Reboot(); });
+        });
 
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -133,14 +160,15 @@ private:
     // 物联网初始化，添加对 AI 可见设备
     void InitializeTools() {
         static LampController lamp(LAMP_GPIO);
-#if CONFIG_MUSIC_BRIDGE_BLE
-        // BLE and the voice tools start once the board is fully built.
-        Application::GetInstance().Schedule([]() { MusicBridge::GetInstance().Start(); });
+#if CONFIG_POMODORO_TIMER
+        Pomodoro::GetInstance().RegisterTools();
 #endif
+        // BLE is not started here: without PSRAM there is no RAM for BLE next to Wi-Fi, TLS and
+        // audio (it takes ~65 KB). WifiBoard starts it only for the QR Wi-Fi setup, which reboots.
     }
 
 public:
-    CompactWifiBoard() : WifiBoard(), boot_button_(BOOT_BUTTON_GPIO), touch_button_(TOUCH_BUTTON_GPIO), asr_button_(ASR_BUTTON_GPIO)
+    CompactWifiBoard() : WifiBoard(), boot_button_(BOOT_BUTTON_GPIO, false, 5000), touch_button_(TOUCH_BUTTON_GPIO), asr_button_(ASR_BUTTON_GPIO)
     {
         InitializeDisplayI2c();
         InitializeSsd1306Display();
@@ -162,6 +190,14 @@ public:
 
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    // USB powered: the deepest Wi-Fi sleep (MAX_MODEM) is not worth it here, and with some
+    // routers it drops the broker connection while idle ("No PING_RESP", then a server timeout on
+    // the next conversation). Idle uses the moderate level instead.
+    virtual void SetPowerSaveLevel(PowerSaveLevel level) override {
+        WifiBoard::SetPowerSaveLevel(level == PowerSaveLevel::LOW_POWER ? PowerSaveLevel::BALANCED
+                                                                        : level);
     }
 
 };

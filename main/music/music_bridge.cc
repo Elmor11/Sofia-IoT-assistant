@@ -17,6 +17,7 @@
 
 #include <cJSON.h>
 #include <esp_bt.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_random.h>
@@ -228,11 +229,19 @@ void OnReset(int reason) { ESP_LOGW(TAG, "BLE host reset, reason=%d", reason); }
 
 void OnSyncCallback() { MusicBridge::GetInstance().OnSync(); }
 
-ToolResult SendToPhone(const char* command, const char* query, int delta) {
+// What a successful command means: the phone app got it, not that the music changed yet. Saying so
+// keeps the assistant from claiming something is playing when Spotify could still fail.
+constexpr char kSentNote[] = "Sent to the phone; not confirmed yet.";
+
+ToolResult SendToPhone(const char* command, const char* query, int delta,
+                       const char* kind = nullptr) {
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_CreateObject(), cJSON_Delete);
     cJSON_AddStringToObject(root.get(), "c", command);
     if (query != nullptr) {
         cJSON_AddStringToObject(root.get(), "q", query);
+    }
+    if (kind != nullptr && kind[0] != '\0') {
+        cJSON_AddStringToObject(root.get(), "k", kind);
     }
     if (delta != 0) {
         cJSON_AddNumberToObject(root.get(), "d", delta);
@@ -245,9 +254,10 @@ ToolResult SendToPhone(const char* command, const char* query, int delta) {
     cJSON_free(text);
     if (!MusicBridge::GetInstance().SendCommand(json)) {
         return std::unexpected(
-            "The phone is not connected. Ask the user to open the Sofia Music app on the phone.");
+            "The phone is not connected, nothing was played. Tell the user and ask them to open "
+            "the Sofia app on the phone (same Wi-Fi as the device).");
     }
-    return true;
+    return std::string(kSentNote);
 }
 
 }  // namespace
@@ -257,12 +267,21 @@ MusicBridge& MusicBridge::GetInstance() {
     return instance;
 }
 
-void MusicBridge::Start() {
-    static bool started = false;
-    if (started) {
+void MusicBridge::ReleaseMemory() {
+    if (started_ || released_) {
         return;
     }
-    started = true;
+    released_ = true;
+    esp_err_t err = esp_bt_mem_release(ESP_BT_MODE_BTDM);
+    ESP_LOGI(TAG, "Bluetooth memory released (%s), free sram %u", esp_err_to_name(err),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+}
+
+void MusicBridge::Start() {
+    if (started_ || released_) {
+        return;
+    }
+    started_ = true;
 
     LoadIdentity();
 
@@ -302,12 +321,17 @@ void MusicBridge::Start() {
     nimble_port_freertos_init(HostTask);
 
     RegisterTools();
-    ESP_LOGI(TAG, "Started, advertising as %s", device_name_.c_str());
+    ESP_LOGI(TAG, "Started, advertising as %s (free sram %u)", device_name_.c_str(),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
 }
 
 // The BLE name comes from the Bluetooth MAC; the pairing secret is random and kept in NVS so the
 // QR code is the same on every boot.
 void MusicBridge::LoadIdentity() {
+    if (identity_loaded_) {
+        return;
+    }
+    identity_loaded_ = true;
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_BT);
     char name[16];
@@ -356,6 +380,10 @@ bool MusicBridge::BeginWifiProvisioning(const char* caption) {
     bad_attempts_ = 0;
     provisioning_ = true;
     ESP_LOGI(TAG, "Waiting for Wi-Fi credentials from the phone app (%s)", device_name_.c_str());
+    // Advertising starts only now, with the QR code on screen (see OnSync).
+    if (synced_) {
+        Advertise();
+    }
     return true;
 }
 
@@ -480,10 +508,33 @@ void MusicBridge::OnSync() {
         ESP_LOGE(TAG, "No BLE address, rc=%d", rc);
         return;
     }
-    Advertise();
+    synced_ = true;
+    // BLE is only used for the QR Wi-Fi setup: advertise once the QR code is up, not before (a
+    // phone connecting in between would find no provisioning session).
+    if (provisioning_) {
+        Advertise();
+    }
+}
+
+void MusicBridge::ScheduleAdvertiseRetry() {
+    static esp_timer_handle_t timer = nullptr;
+    if (timer == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void*) { MusicBridge::GetInstance().Advertise(); };
+        args.name = "ble_adv_retry";
+        if (esp_timer_create(&args, &timer) != ESP_OK) {
+            timer = nullptr;
+            return;
+        }
+    }
+    esp_timer_stop(timer);
+    esp_timer_start_once(timer, 500 * 1000);
 }
 
 void MusicBridge::Advertise() {
+    if (!synced_ || !provisioning_ || connected_ || ble_gap_adv_active()) {
+        return;
+    }
     struct ble_hs_adv_fields fields = {};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.name = reinterpret_cast<const uint8_t*>(device_name_.c_str());
@@ -506,7 +557,9 @@ void MusicBridge::Advertise() {
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
     rc = ble_gap_adv_start(own_addr_type_, nullptr, BLE_HS_FOREVER, &params, GapEvent, nullptr);
     if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGE(TAG, "ble_gap_adv_start failed, rc=%d", rc);
+        // Typically right after a failed or closed connection whose slot is not free yet.
+        ESP_LOGW(TAG, "ble_gap_adv_start failed, rc=%d; retrying", rc);
+        ScheduleAdvertiseRetry();
     }
 }
 
@@ -544,6 +597,10 @@ void MusicBridge::OnSubscribe(bool notify) {
 }
 
 bool MusicBridge::SendCommand(const std::string& json) {
+    if (lan_ready_ && SendLan(json)) {
+        ESP_LOGI(TAG, "Sent command over LAN: %s", json.c_str());
+        return true;
+    }
     if (!connected_ || !encrypted_ || !subscribed_) {
         return false;
     }
@@ -612,22 +669,35 @@ void MusicBridge::ShowNowPlaying(const std::string& title, const std::string& ar
 }
 
 void MusicBridge::RegisterTools() {
+    if (tools_registered_) {
+        return;
+    }
+    tools_registered_ = true;
     auto& server = McpServer::GetInstance();
 
-    server.AddTool("self.music.play",
-                   "Play a song, artist, album or playlist on the user's phone through the Sofia "
-                   "Music app. Use it when the user asks to play, put on or listen to music. Pass "
-                   "what the user asked for as `query`, for example a song title and its artist. "
-                   "The player shows up on the device screen by itself.",
-                   PropertyList({Property("query", kPropertyTypeString)}),
-                   [](const PropertyList& properties) -> ToolResult {
-                       std::string query = TruncateUtf8(properties["query"].value<std::string>(),
-                                                        kMaxQueryBytes);
-                       if (query.empty()) {
-                           return std::unexpected("The query is empty");
-                       }
-                       return SendToPhone("play", query.c_str(), 0);
-                   });
+    server.AddTool(
+        "self.music.play",
+        "The only way to play music (Spotify on the user's phone). `query`: the user's words, "
+        "song and artist if said; misspelled names are fine. `type`: track, artist, album, "
+        "playlist or any. Without a title, use self.music.resume.",
+        PropertyList({Property("query", kPropertyTypeString),
+                      Property("type", kPropertyTypeString, std::string("any"))}),
+        [](const PropertyList& properties) -> ToolResult {
+            std::string query =
+                TruncateUtf8(properties["query"].value<std::string>(), kMaxQueryBytes);
+            if (query.empty()) {
+                return std::unexpected("The query is empty");
+            }
+            std::string type = properties["type"].value<std::string>();
+            static const char* const kTypes[] = {"track", "artist", "album", "playlist"};
+            const char* kind = nullptr;
+            for (const char* known : kTypes) {
+                if (type == known) {
+                    kind = known;
+                }
+            }
+            return SendToPhone("play", query.c_str(), 0, kind);
+        });
 
     struct Simple {
         const char* tool;
@@ -657,9 +727,8 @@ void MusicBridge::RegisterTools() {
     }
 
     server.AddTool("self.music.get_now_playing",
-                   "Get the song currently playing on the user's phone: title, artist, position "
-                   "and duration in seconds, and state (playing, paused or stopped). Use it to "
-                   "answer what is playing.",
+                   "What is playing on the user's phone (title, artist, state). Check it before "
+                   "saying something is playing.",
                    PropertyList(), [this](const PropertyList&) -> ToolResult {
                        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(cJSON_CreateObject(),
                                                                             cJSON_Delete);

@@ -1,7 +1,105 @@
-# Music bridge (BLE) — protocolo entre la placa y la app del teléfono
+# Music bridge — protocolo entre la placa y la app del teléfono
 
-La placa se conecta por BLE a una app Android. La app ejecuta las órdenes de música (por voz) en el
-teléfono y le cuenta a la placa qué está sonando, para que dibuje el reproductor en la pantalla OLED.
+La app ejecuta en el teléfono las órdenes de música (por voz) y le cuenta a la placa qué está
+sonando, para que dibuje el reproductor en la pantalla OLED.
+
+> **Canal actual: red local (Wi‑Fi), no BLE.** En el ESP32 sin PSRAM, tener el BLE encendido junto
+> con Wi‑Fi, TLS y audio deja la placa sin RAM: falla la activación y se reinicia. Por eso:
+>
+> - El **BLE solo se usa para configurar el Wi‑Fi con el QR** (sección "Configurar el Wi‑Fi con el
+>   QR"). Cuando el Wi‑Fi conecta, la placa libera la memoria del Bluetooth y el BLE queda apagado
+>   hasta el siguiente reinicio.
+> - La música va por la **red local** (sección "Conexión por la red local"), con los mismos JSON
+>   `Cmd` y `State` descritos abajo. Las secciones de roles, conexión y UUID BLE quedan como
+>   referencia, pero en esta placa la placa ya no anuncia el servicio de música por BLE.
+
+## Conexión por la red local
+
+El teléfono tiene que estar en la **misma red Wi‑Fi** que la placa.
+
+### 1. Descubrir la placa (UDP 8766)
+
+La app envía el texto `SOFIA?` por UDP al puerto **8766**, a la dirección de broadcast de la red
+(por ejemplo `192.168.0.255`) o a `255.255.255.255`. Cada placa responde al remitente:
+
+```json
+{"n":"Sofia-D3DE","p":8765}
+```
+
+- `n`: nombre de la placa. Los 4 últimos dígitos coinciden con los del QR (`SF D3DE ...`): así la
+  app sabe cuál es la suya.
+- `p`: puerto TCP.
+- **Reintentar**: la placa ahorra energía en el Wi‑Fi y puede perderse un broadcast suelto. Enviar
+  `SOFIA?` cada 500 ms durante unos 5 s (en pruebas respondió al 3.er intento). La IP de la respuesta
+  se puede guardar y usar directamente la próxima vez (un envío directo a la IP responde a la
+  primera).
+- En Android hace falta un `WifiManager.MulticastLock` para recibir respuestas a broadcast en
+  algunos teléfonos.
+
+### 2. Conectarse y autenticarse (TCP 8765)
+
+Mensajes JSON de una línea, terminados en `\n`, en ambos sentidos.
+
+1. La app abre TCP a `IP:8765`. La placa saluda:
+
+   ```json
+   {"hello":"Sofia-D3DE","nonce":"9649ffb87447769b4973e7d1cc100970"}
+   ```
+
+2. La app responde en menos de **10 s** con:
+
+   ```json
+   {"auth":"<64 dígitos hex>"}
+   ```
+
+   donde el valor es `HMAC-SHA256(clave, nonce)` en hexadecimal:
+   - `clave`: los **10 bytes** del secreto del QR (los 20 dígitos hex convertidos a bytes, igual que
+     para el cifrado del Wi‑Fi).
+   - `nonce`: el texto del campo `nonce` tal cual (32 caracteres ASCII), no sus bytes.
+
+3. La placa contesta `{"auth":"ok"}` y la conexión queda lista. Si la clave no coincide contesta
+   `{"auth":"bad"}` y cierra. Tras **8 intentos fallidos** responde `{"auth":"locked"}` a cualquier
+   conexión hasta que se reinicie.
+
+Ejemplo en Kotlin:
+
+```kotlin
+val key = SecretKeySpec(secretHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray(), "HmacSHA256")
+val mac = Mac.getInstance("HmacSHA256").apply { init(key) }.doFinal(nonce.toByteArray(Charsets.US_ASCII))
+val auth = mac.joinToString("") { "%02x".format(it) }
+```
+
+### 3. Mensajes
+
+- Placa → app: órdenes con el mismo formato que `Cmd` (`{"c":"play","q":"..."}`, etc.), una por
+  línea.
+- App → placa: estado con el mismo formato que `State` (`{"t":"...","a":"...","p":...,"d":...,"s":1}`),
+  una por línea, **240 bytes como máximo** (una línea más larga cierra la conexión).
+
+### Reglas
+
+- **Un teléfono a la vez**: una conexión nueva reemplaza a la anterior.
+- La placa activa *TCP keepalive* (detecta en ~1 min un teléfono que se fue sin cerrar). Si la
+  conexión se cae, la app debe volver a conectarse (y, si la IP cambió, volver a descubrir).
+- Al cerrarse la conexión, la placa oculta el reproductor.
+- El canal no va cifrado (solo autenticado). Úsalo solo en una red de confianza.
+
+### Probar sin la app
+
+Descubrimiento desde PowerShell en un PC de la misma red:
+
+```powershell
+$u = New-Object System.Net.Sockets.UdpClient 0; $u.EnableBroadcast = $true; $u.Client.ReceiveTimeout = 600
+$b = [Text.Encoding]::ASCII.GetBytes('SOFIA?')
+1..10 | % { [void]$u.Send($b, $b.Length, '192.168.0.255', 8766); try { $ep = New-Object Net.IPEndPoint([Net.IPAddress]::Any, 0); [Text.Encoding]::ASCII.GetString($u.Receive([ref]$ep)); break } catch {} }
+```
+
+El firewall de Windows puede bloquear la respuesta para `python.exe` si no tiene permiso en redes
+privadas.
+
+---
+
+Lo que sigue describe el canal BLE original (y el QR, que sigue usándolo).
 
 - Firmware: [main/music/music_bridge.cc](../main/music/music_bridge.cc), se activa con
   `CONFIG_MUSIC_BRIDGE_BLE=y` (junto con `CONFIG_BT_NIMBLE_ENABLED=y`; ya está en la variante
@@ -50,6 +148,9 @@ UUID propuestos (cámbialos en el firmware y en la app a la vez si hace falta):
 ```
 
 - `c`: orden. `q`: texto de búsqueda para `play` (máx. 100 bytes, en el idioma que dijo el usuario).
+- `k` (opcional, solo en `play`): qué busca el usuario: `track` (una canción), `artist`, `album` o
+  `playlist`. Si no viene, no se sabe: la app decide (por ejemplo, canción y artista). Ejemplo:
+  `{"c":"play","q":"tabata","k":"playlist"}`. Una app que no lo conozca puede ignorarlo.
 - `d` en `vol`: `1` sube y `-1` baja el volumen del teléfono.
 - Una orden por notificación. La app no responde por esta vía: el efecto se ve en el siguiente
   `State`.
@@ -151,6 +252,18 @@ Cuando `s` es `0` o `1`, los ojos se encogen a la izquierda y aparece el reprodu
 artista desplazándose, barra de progreso, `1:25 / 3:40` y los iconos de pausa y siguiente (en la
 pantalla de 128x32 solo título y barra). Las alertas y avisos (por ejemplo la configuración Wi‑Fi)
 tienen prioridad y ocultan el reproductor mientras estén visibles.
+
+Mientras `s` es `1` (sonando) los ojos **bailan** a 120 BPM en su columna: rebotan en cada pulso,
+se mecen cada compás y alternan el ojo grande. No es el ritmo real de la canción (la placa no
+recibe el audio); si la app enviara el BPM se podría ajustar. Si hay un pomodoro en marcha, su
+pantalla tiene prioridad sobre el reproductor.
+
+## Borrar la vinculación desde la placa
+
+Mantener el botón BOOT pulsado 5 s borra la red Wi‑Fi, el secreto del QR (`sofia_link`) y las
+claves Bluetooth (`nimble_bond`), y reinicia la placa en modo de vinculación con un QR nuevo. La
+app debe olvidar la placa vieja (secreto anterior) y el teléfono, quitar `Sofia-ABCD` de sus
+dispositivos Bluetooth.
 
 ## Probar sin la app
 

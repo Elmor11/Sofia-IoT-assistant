@@ -5,6 +5,9 @@ abierto [XiaoZhi ESP32](https://github.com/78/xiaozhi-esp32) (licencia MIT). Usa
 voz oficial de [xiaozhi.me](https://xiaozhi.me): la placa captura el audio, el servidor hace el
 reconocimiento de voz, el modelo de IA y la voz, y la placa reproduce la respuesta.
 
+**Versión actual: Sofia 0.4.0** (basada en XiaoZhi 2.5.3). Historial en
+[CHANGELOG.md](CHANGELOG.md); cada versión tiene su etiqueta de git `sofia-vX.Y.Z`.
+
 ## Cambios realizados
 
 - **Ojos reactivos** en la pantalla OLED (`CONFIG_OLED_REACTIVE_EYES`):
@@ -14,14 +17,29 @@ reconocimiento de voz, el modelo de IA y la voz, y la placa reproduce la respues
   - No se muestra texto de "escuchando" ni de "respondiendo", ni la conversación.
   - Cuando hace falta texto (alertas, avisos, configuración Wi‑Fi, código), los ojos se encogen
     con una animación hacia la izquierda y aparece el texto. Al terminar, vuelven a crecer.
+  - Se mueven con "resorte" (se pasan un poco y vuelven), se aplastan al parpadear, a veces
+    parpadean dos veces o ladean la mirada, y respiran en reposo.
+  - **En reposo** (40 s quieta): imagina con burbujas de pensamiento, juega con una pelota o
+    tararea. A los **2 minutos** le da sueño, cabecea y se duerme respirando con "Z" flotando;
+    al hablarle abre los ojos poco a poco.
+  - **Escenas**: con la música sonando baila (120 BPM); durante el pomodoro lee un libro y martilla
+    (estudio) o hace pesas y tararea (descanso).
+- **Pomodoro de estudio** (`CONFIG_POMODORO_TIMER`): por voz ("empieza un pomodoro"), con un arco
+  de progreso semicircular, melodía en cada cambio de fase e historial de 7 días.
+  Ver [docs/pomodoro.md](docs/pomodoro.md).
+- **Botón BOOT mantenido 5 s**: borra la red Wi‑Fi y la vinculación con el teléfono y reinicia
+  mostrando un QR nuevo (conserva la activación de xiaozhi.me).
+- **Red más estable**: si el servidor no responde tras un rato en reposo, reconecta y reintenta;
+  si falla dos veces seguidas, se reinicia sola. En reposo el Wi‑Fi usa un ahorro moderado.
 - **Configuración Wi‑Fi en dos fases**:
   1. *Paso 1/2*: te pide conectarte a la red Wi‑Fi (hotspot) de la placa.
   2. *Paso 2/2*: cuando un dispositivo se une a esa red, muestra la URL de la página de
      configuración.
-- **Puente de música por BLE** (`CONFIG_MUSIC_BRIDGE_BLE`): las órdenes de voz (poner, pausar,
-  siguiente, volumen) se envían por Bluetooth de bajo consumo a una app Android, y la pantalla
-  muestra un reproductor (título, artista, barra de progreso) mientras suena algo. Protocolo
-  completo en [docs/music-bridge.md](docs/music-bridge.md).
+- **Puente de música con el teléfono** (`CONFIG_MUSIC_BRIDGE_BLE`): las órdenes de voz (poner,
+  pausar, siguiente, volumen) llegan a una app Android, y la pantalla muestra un reproductor
+  (título, artista, barra de progreso) mientras suena algo. BLE solo se usa para vincular; la
+  música va por la **red local** (TCP/UDP con autenticación HMAC) porque sin PSRAM no caben BLE,
+  Wi‑Fi, TLS y audio a la vez. Protocolo completo en [docs/music-bridge.md](docs/music-bridge.md).
 - **Configuración Wi‑Fi con código QR** (pantalla 128x64): la placa muestra un QR que la app escanea
   para enviarle la red por BLE con cifrado AES‑128‑GCM. Si la pantalla no puede mostrar el QR
   (128x32), se usa el hotspot de las dos fases.
@@ -56,7 +74,29 @@ cableado antes de grabar.
 
 ## Compilar
 
-Con Docker, desde la carpeta del proyecto:
+### Opción rápida (recomendada en Windows): `scripts/build-fast.sh`
+
+Con Docker Desktop abierto, desde la carpeta del proyecto en Git Bash:
+
+```sh
+bash scripts/build-fast.sh                 # placa bread-compact-esp32
+bash scripts/build-fast.sh <placa> <salida> # opcional: otra placa / otra carpeta de salida
+```
+
+El script copia el código a un volumen de Docker (`sofia-work`) y usa ccache (volumen
+`sofia-ccache`), así se evita la lentitud del disco de Windows montado en Docker. Al terminar
+imprime `BUILD_OK` y deja los binarios en `~/Downloads/xiaozhi-build-out/`:
+
+- `merged-binary.bin`: imagen completa, se graba en `0x0`.
+- `xiaozhi.bin`: solo la aplicación (para OTA).
+
+Tiempos medidos en Windows: la primera vez unos 14 minutos (descarga la imagen
+`espressif/idf:release-v6.1`, los componentes y compila ~2000 archivos); las siguientes
+reutilizan el volumen y la caché y tardan pocos minutos.
+
+### Otras opciones
+
+Con Docker montando la carpeta directamente (más lento en Windows):
 
 ```sh
 docker run --rm -v "$(pwd):/project" -w /project espressif/idf:release-v6.1 \
@@ -73,25 +113,39 @@ python3 scripts/build.py bread-compact-esp32 --name bread-compact-esp32
 Para la pantalla de 128x32 usa `--name bread-compact-esp32-128x32`. Para ver todas las placas:
 `python3 scripts/build.py --list-boards`.
 
-La primera compilación descarga dependencias y tarda bastante (unos 40 minutos en pruebas con
-Docker en Windows). El resultado queda en `build/`; el archivo que se graba entero es
-`build/merged-binary.bin`.
+Con estas opciones la primera compilación tarda bastante más (unos 40 minutos en pruebas con
+Docker montando la carpeta en Windows). El resultado queda en `build/`; el archivo que se graba
+entero es `build/merged-binary.bin`.
 
 ## Grabar la placa
 
 1. Conecta la placa por USB. Debe aparecer como un puerto COM (con un CH340 aparece como
    "USB-SERIAL CH340"). Si no aparece, prueba otro cable (algunos solo cargan) o instala el
-   driver CH340.
-2. Con *Flash Download Tools*: carga `merged-binary.bin` en la dirección `0x0`, elige el puerto,
-   velocidad 460800 y pulsa **START**. No marques ERASE: borrar la flash elimina el Wi‑Fi guardado
-   y la activación.
-3. Con `esptool`:
+   driver CH340. En PowerShell puedes ver el puerto con
+   `[System.IO.Ports.SerialPort]::GetPortNames()`.
+2. **Recomendado: `esptool`** (se instala una vez con `python -m pip install esptool`). Cambia
+   `COM3` por tu puerto:
 
    ```sh
-   python -m esptool --chip esp32 -b 460800 write-flash 0x0 build/merged-binary.bin
+   python -m esptool --chip esp32 -p COM3 -b 460800 write-flash 0x0 ~/Downloads/xiaozhi-build-out/merged-binary.bin
    ```
 
-4. Reinicia la placa.
+   Tarda unos 40 segundos. Debe terminar con `Hash of data verified.` y reinicia la placa sola.
+   Si se queda en `Connecting...`, mantén pulsado BOOT hasta que empiece a escribir.
+3. Alternativa, *Flash Download Tools* de Espressif: al abrirla elige ChipType **ESP32**,
+   WorkMode **Develop**, LoadMode **UART**. Marca la primera fila, carga `merged-binary.bin` en la
+   dirección `0x0`, deja SPI 40MHz / DIO y `DoNotChgBin` marcado, elige el puerto, velocidad
+   460800 y pulsa **START**. No pulses ERASE: borra la flash (incluido el Wi‑Fi guardado y la
+   activación) y, si la escritura no llega a completarse, la placa queda sin firmware.
+
+### Comprobar que arrancó
+
+Abre el monitor serie a 115200 baudios (`idf.py monitor`, PuTTY o el monitor de Arduino) y
+reinicia la placa. Un arranque correcto muestra `SKU=bread-compact-esp32`, la inicialización de
+la OLED y, sin red guardada, `State: starting -> wifi_configuring`.
+
+Si ves en bucle `invalid header: 0xffffffff`, la flash está vacía (se borró pero no se escribió
+el firmware). La placa no está dañada: vuelve a grabar `merged-binary.bin` con `esptool`.
 
 ## Primer uso
 
@@ -106,6 +160,11 @@ Docker en Windows). El resultado queda en `build/`; el archivo que se graba ente
    consola de xiaozhi.me para vincular el dispositivo a tu agente.
 3. **Hablar.** Pulsa BOOT y habla. Los ojos reaccionan al estado de ánimo de la respuesta.
 
+Para cambiar de red o de teléfono, **mantén BOOT pulsado 5 s**: aparece "Borrando conexion...",
+la placa se reinicia y muestra un QR nuevo. Elimina antes "Sofia-XXXX" del Bluetooth del teléfono.
+Para dejarla totalmente de fábrica (identificador y activación nuevos, sin historial del pomodoro)
+hay que borrar la NVS por USB: `python -m esptool --chip esp32 -p COM3 erase-region 0x9000 0x4000`.
+
 ## Personalizar el agente (en xiaozhi.me, sin tocar el firmware)
 
 - **Modelo de IA (LLM), rol y personalidad, voz (TTS):** Agents → tu agente → Configure.
@@ -113,6 +172,18 @@ Docker en Windows). El resultado queda en `build/`; el archivo que se graba ente
 - **Herramientas propias:** Custom Services → MCP Endpoint.
 
 La voz y el modelo los decide el servidor. El firmware solo reproduce el audio recibido.
+
+## Herramientas por voz (MCP del dispositivo)
+
+| Herramienta | Para qué |
+| --- | --- |
+| `self.music.play`, `pause`, `resume`, `next`, `previous`, `volume_up`, `volume_down`, `get_now_playing` | Música de Spotify en el teléfono |
+| `self.pomodoro` (`action`: start, pause, resume, stop, status) | Pomodoro y horas de estudio |
+| `self.lamp.*`, `self.audio_speaker.set_volume`, `self.get_device_status`, ... | Herramientas base de XiaoZhi |
+
+Sin PSRAM la memoria es justa: mantén las descripciones cortas y agrupa acciones en una sola
+herramienta. La lista se envía al servidor en páginas de `CONFIG_MCP_TOOLS_LIST_PAGE_SIZE` bytes
+(2000 en esta placa).
 
 ## Cómo funcionan los ojos
 
@@ -126,6 +197,10 @@ integración con el layout y la lógica de cuándo mostrar texto están en
 - Los nombres que no son estados de ánimo (iconos de alerta) muestran el icono y el texto en lugar
   de los ojos.
 - Las conversaciones solo aparecen si el contenido parece código.
+- Las actividades de reposo solo ocurren con los ojos solos y en estado neutro; cualquier emoción
+  del servidor las interrumpe. Las escenas (`OledEyes::SetScene`) las decide `OledDisplay` según
+  el pomodoro y la música; mientras hay texto en pantalla no hay escena.
+- El baile no sigue el ritmo real: la música suena en el teléfono y la placa no recibe su audio.
 
 ## Depuración
 
@@ -145,13 +220,18 @@ grabada, busca la línea `Compile time` al arrancar.
   variante 128x32 compila pero no está probada en hardware.
 - Compilar correctamente no equivale a validar en hardware. Los cambios de audio y red necesitan
   pruebas físicas.
-- Sin PSRAM: no hay palabra de activación ni AEC, y la memoria libre es limitada. Wi‑Fi y BLE a la
-  vez dejan poca RAM; revisa `free sram` en el log tras compilar.
-- El puente de música y el QR de Wi‑Fi compilan, pero no se han probado en hardware con una app real.
+- Sin PSRAM: no hay palabra de activación ni AEC, y la memoria libre es limitada (unos 85-90 KB
+  en reposo, mínimo ~50 KB al conectar). Revisa `free sram` y `minimal sram` en el log tras
+  cada cambio; un `abort()` con `operator new` en el backtrace es falta de memoria.
+- Vinculación por QR, enlace de música por red local, reconexión y reinicio automático probados
+  en hardware con la app. Pendiente de probar en hardware en 0.4.0: pomodoro completo, escenas
+  y baile en la pantalla, y el borrado con BOOT.
+- Con algunos routers TP-Link en 2,4 GHz y 40 MHz la placa puede ser expulsada de la red
+  (`reason: 3`); se reconecta sola en segundos. Un canal fijo de 20 MHz en el router lo evita.
 
 ## Ideas futuras
 
-- Más comportamientos de los ojos en reposo (bostezo, sueño, sobresalto).
+- Que la app envíe el BPM de la canción para que el baile siga el ritmo real.
 - App Android complementaria que implemente el protocolo de [docs/music-bridge.md](docs/music-bridge.md)
   (el firmware ya está; la app aún no está en este repositorio).
 - Herramientas del dispositivo (MCP local) para controlar brillo, volumen o hardware extra.

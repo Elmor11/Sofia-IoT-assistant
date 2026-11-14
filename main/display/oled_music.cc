@@ -127,6 +127,8 @@ bool OledMusicPanel::IsShown() const { return !lv_obj_has_flag(obj_, LV_OBJ_FLAG
 
 bool OledMusicPanel::Active() const { return state_ != kMusicStopped; }
 
+bool OledMusicPanel::Playing() const { return state_ == kMusicPlaying; }
+
 int64_t OledMusicPanel::CurrentPositionMs() const {
     int64_t position = position_ms_;
     if (state_ == kMusicPlaying) {

@@ -131,7 +131,18 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             in_config_mode_ = false;
             connect_failed_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
+#if CONFIG_MUSIC_BRIDGE_BLE
+            // BLE is only used for the QR Wi-Fi setup (which reboots). Once online, its RAM is
+            // worth more to TLS and audio; a later setup falls back to the hotspot.
+            MusicBridge::GetInstance().ReleaseMemory();
+            // The phone app reaches the device over the local network instead.
+            // Scheduled: it registers MCP tools, which the main task also reads.
+            Application::GetInstance().Schedule([]() { MusicBridge::GetInstance().StartLan(); });
+#endif
             if (auto display = GetDisplay()) {
+                // The setup QR code may still be up if the new network connected before the
+                // post-setup reboot.
+                display->HidePairingQr();
                 display->ShowNotification(("WiFi conectado: " + data).c_str(), 3000);
             }
             break;

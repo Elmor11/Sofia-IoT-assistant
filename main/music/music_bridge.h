@@ -21,9 +21,19 @@ public:
     static MusicBridge& GetInstance();
 
     // Registers the MCP tools and starts advertising. Call once, after NVS is initialized.
+    // Does nothing after ReleaseMemory().
     void Start();
 
-    bool IsConnected() const { return connected_.load(); }
+    // Without PSRAM the Bluetooth controller's reserved RAM (~50 KB) is needed for TLS and audio.
+    // When BLE has not been started, gives it back to the heap; BLE stays off until reboot.
+    void ReleaseMemory();
+
+    // Serves the phone app over the local network instead of BLE: discovery on UDP 8766, link on
+    // TCP 8765, authenticated with the QR secret (docs/music-bridge.md). Uses a few KB of RAM, so
+    // it fits next to Wi-Fi, TLS and audio. Call once Wi-Fi is connected; safe to call again.
+    void StartLan();
+
+    bool IsConnected() const { return connected_.load() || lan_ready_.load(); }
     bool IsProvisioning() const { return provisioning_.load(); }
     // Sends a command line to the phone. False when the phone is not connected and ready.
     bool SendCommand(const std::string& json);
@@ -47,6 +57,25 @@ public:
 
 private:
     MusicBridge() = default;
+
+    bool started_ = false;
+    bool released_ = false;
+    // The BLE host is synced (has an address); advertising is only possible after that.
+    std::atomic<bool> synced_{false};
+    // Retries advertising when it fails (e.g. the connection slot is not free yet).
+    void ScheduleAdvertiseRetry();
+    bool identity_loaded_ = false;
+    bool tools_registered_ = false;
+
+    // Local network link (music_lan.cc).
+    static void LanTask(void* arg);
+    void RunLan();
+    bool SendLan(const std::string& line);
+    bool VerifyLanAuth(const std::string& nonce_hex, const char* mac_hex);
+    bool lan_started_ = false;
+    std::atomic<int> lan_fd_{-1};
+    std::atomic<bool> lan_ready_{false};  // a phone is connected and authenticated
+    std::mutex lan_send_mutex_;
 
     void RegisterTools();
     void LoadIdentity();

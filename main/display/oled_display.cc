@@ -16,6 +16,7 @@
 
 #define TAG "OledDisplay"
 
+
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_material_symbols_30_1);
@@ -108,6 +109,15 @@ void OledDisplay::SetupUI() {
     eyes_ = std::make_unique<OledEyes>(lv_screen_active(), 0, top, 32, height_ - top);
     // The music player takes the space to the right of the compact eyes.
     music_ = std::make_unique<OledMusicPanel>(lv_screen_active(), 36, 0, width_ - 36, height_);
+    // The pomodoro arc: around the eyes on 128x64 (they act out the scene inside it), next to
+    // the compact eyes on short displays. It wins over the player.
+    if (height_ == 64) {
+        pomodoro_ = std::make_unique<OledPomodoroPanel>(lv_screen_active(), 0, 0, width_,
+                                                        height_);
+    } else {
+        pomodoro_ =
+            std::make_unique<OledPomodoroPanel>(lv_screen_active(), 36, 0, width_ - 36, height_);
+    }
     SetTextUiVisible(false, false);
     layout_timer_ = lv_timer_create(OnLayoutTimer, 100, this);
 #endif
@@ -156,9 +166,10 @@ void OledDisplay::UpdateEyesLayout() {
     bool icon_alert = !eyes_->IsVisible();
     bool needs_text = chat_visible || notification_visible || icon_alert;
     bool needs_status = notification_visible || icon_alert;
-    bool music_active = music_ != nullptr && music_->Active();
-    // The eyes stay in the compact box while text or the music player needs the space.
-    bool needs_compact = needs_text || music_active;
+    bool pomodoro_active = pomodoro_ != nullptr && pomodoro_->Active();
+    bool music_active = music_ != nullptr && music_->Active() && !pomodoro_active;
+    // The eyes stay in the compact box while text, the timer or the music player needs the space.
+    bool needs_compact = needs_text || music_active || pomodoro_active;
 
     uint32_t now = lv_tick_get();
     if (needs_compact) {
@@ -186,8 +197,40 @@ void OledDisplay::UpdateEyesLayout() {
         if ((!text_ui_shown_ || status_shown_ != needs_status) && (eyes_clear || icon_alert)) {
             SetTextUiVisible(true, needs_status);
         }
-    } else if (text_ui_shown_ && music_active) {
+    } else if (text_ui_shown_ && (music_active || pomodoro_active)) {
         SetTextUiVisible(false, false);
+    }
+
+    // Where the compact eyes sit: inside the pomodoro arc, or in the left column.
+    bool banner = pomodoro_active && !needs_text && height_ == 64;
+    if (banner) {
+        lv_area_t inner = pomodoro_->InnerBox();
+        eyes_->SetCompactBox(inner.x1, inner.y1, inner.x2 - inner.x1 + 1, inner.y2 - inner.y1 + 1);
+    } else {
+        int top = (height_ == 64) ? 16 : 0;
+        eyes_->SetCompactBox(0, top, 32, height_ - top);
+    }
+
+    // What the eyes act out. Nothing while text is on screen.
+    OledEyes::Scene scene = OledEyes::Scene::kNone;
+    if (!needs_text) {
+        if (pomodoro_active && pomodoro_->Running()) {
+            scene = pomodoro_->Phase() == kPomodoroFocus ? OledEyes::Scene::kFocus
+                                                         : OledEyes::Scene::kBreak;
+        } else if (music_active && music_->Playing()) {
+            scene = OledEyes::Scene::kMusic;
+        }
+    }
+    eyes_->SetScene(scene);
+
+    if (pomodoro_ != nullptr) {
+        bool show_pomodoro = text_mode_ && !needs_text && pomodoro_active && eyes_clear;
+        if (pomodoro_->IsShown() != show_pomodoro) {
+            pomodoro_->Show(show_pomodoro);
+        }
+        if (show_pomodoro) {
+            pomodoro_->Tick();
+        }
     }
 
     // Alerts and notifications win over the player; it comes back when they are gone.
@@ -207,6 +250,14 @@ void OledDisplay::SetNowPlaying(const char* title, const char* artist, int64_t p
     DisplayLockGuard lock(this);
     if (music_ != nullptr) {
         music_->SetTrack(title, artist, position_ms, duration_ms, state);
+    }
+}
+
+void OledDisplay::SetPomodoro(int phase, int64_t elapsed_ms, int64_t total_ms, bool running,
+                              int round, int rounds) {
+    DisplayLockGuard lock(this);
+    if (pomodoro_ != nullptr) {
+        pomodoro_->SetState(phase, elapsed_ms, total_ms, running, round, rounds);
     }
 }
 #endif
@@ -229,25 +280,22 @@ constexpr int kQrBox = 64;     // square the code is drawn in
 constexpr int kQrMaxVersion = 3;
 }  // namespace
 
-void OledDisplay::OnQrDraw(lv_event_t* event) {
-    auto* self = static_cast<OledDisplay*>(lv_event_get_user_data(event));
-    lv_layer_t* layer = lv_event_get_layer(event);
-    lv_area_t area;
-    lv_obj_get_coords(self->qr_code_, &area);
-
-    auto fill = [layer](int x1, int y1, int x2, int y2, lv_color_t color) {
-        lv_draw_rect_dsc_t dsc;
-        lv_draw_rect_dsc_init(&dsc);
-        dsc.bg_color = color;
-        dsc.bg_opa = LV_OPA_COVER;
-        lv_area_t box = {x1, y1, x2, y2};
-        lv_draw_rect(layer, &dsc, &box);
+void OledDisplay::RenderQrPixels() {
+    constexpr int kStride = kQrBox / 8;
+    constexpr size_t kPalette = 2 * sizeof(lv_color32_t);
+    static_assert(sizeof(qr_pixels_) == kPalette + kQrBox * kStride, "QR image buffer size");
+    // On this panel black is the LIT pixel (see the screen's text color), so the lit box with
+    // unlit modules is what phone cameras expect: dark code on a bright background.
+    // Index 0 = black (lit box), index 1 = white (unlit module).
+    auto* palette = reinterpret_cast<lv_color32_t*>(qr_pixels_);
+    palette[0] = lv_color32_make(0x00, 0x00, 0x00, 0xff);
+    palette[1] = lv_color32_make(0xff, 0xff, 0xff, 0xff);
+    uint8_t* bitmap = qr_pixels_ + kPalette;
+    memset(bitmap, 0x00, kQrBox * kStride);
+    auto set_unlit = [bitmap](int px, int py) {
+        bitmap[py * kStride + px / 8] |= static_cast<uint8_t>(0x80 >> (px % 8));
     };
-    // On this panel lv_color_black() is the LIT pixel (see the screen's text color), so the lit
-    // box with unlit modules is what phone cameras expect: dark code on a bright background.
-    fill(area.x1, area.y1, area.x2, area.y2, lv_color_black());
-
-    int size = qrcodegen_getSize(self->qr_modules_);
+    int size = qrcodegen_getSize(qr_modules_);
     int scale = kQrBox / (size + 6);  // leaves a quiet zone of about 3 modules per side
     if (scale < 1) {
         return;
@@ -255,10 +303,13 @@ void OledDisplay::OnQrDraw(lv_event_t* event) {
     int margin = (kQrBox - size * scale) / 2;
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
-            if (qrcodegen_getModule(self->qr_modules_, x, y)) {
-                int px = area.x1 + margin + x * scale;
-                int py = area.y1 + margin + y * scale;
-                fill(px, py, px + scale - 1, py + scale - 1, lv_color_white());
+            if (!qrcodegen_getModule(qr_modules_, x, y)) {
+                continue;
+            }
+            for (int dy = 0; dy < scale; ++dy) {
+                for (int dx = 0; dx < scale; ++dx) {
+                    set_unlit(margin + x * scale + dx, margin + y * scale + dy);
+                }
             }
         }
     }
@@ -292,13 +343,17 @@ bool OledDisplay::SetPairingQr(const char* payload, const char* caption) {
         lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_SCROLLABLE);
 
-        qr_code_ = lv_obj_create(qr_panel_);
-        lv_obj_remove_style_all(qr_code_);
-        lv_obj_set_size(qr_code_, kQrBox, kQrBox);
+        qr_image_.header.magic = LV_IMAGE_HEADER_MAGIC;
+        qr_image_.header.cf = LV_COLOR_FORMAT_I1;
+        qr_image_.header.w = kQrBox;
+        qr_image_.header.h = kQrBox;
+        qr_image_.header.stride = kQrBox / 8;
+        qr_image_.data_size = sizeof(qr_pixels_);
+        qr_image_.data = qr_pixels_;
+
+        qr_code_ = lv_image_create(qr_panel_);
         lv_obj_align(qr_code_, LV_ALIGN_LEFT_MID, 0, 0);
         lv_obj_remove_flag(qr_code_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_remove_flag(qr_code_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(qr_code_, OnQrDraw, LV_EVENT_DRAW_MAIN, this);
 
         qr_caption_ = lv_label_create(qr_panel_);
         lv_obj_set_width(qr_caption_, width_ - 68);
@@ -306,10 +361,19 @@ bool OledDisplay::SetPairingQr(const char* payload, const char* caption) {
         lv_obj_align(qr_caption_, LV_ALIGN_LEFT_MID, 68, 0);
     }
     lv_label_set_text(qr_caption_, caption != nullptr ? caption : "");
+    RenderQrPixels();
+    lv_image_set_src(qr_code_, &qr_image_);
     lv_obj_invalidate(qr_code_);
     lv_obj_remove_flag(qr_panel_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(qr_panel_);
     return true;
+}
+
+void OledDisplay::HidePairingQr() {
+    DisplayLockGuard lock(this);
+    if (qr_panel_ != nullptr) {
+        lv_obj_add_flag(qr_panel_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 #endif
 
@@ -321,6 +385,7 @@ OledDisplay::~OledDisplay() {
             lv_timer_delete(layout_timer_);
             layout_timer_ = nullptr;
         }
+        pomodoro_.reset();
         music_.reset();
         eyes_.reset();
     }

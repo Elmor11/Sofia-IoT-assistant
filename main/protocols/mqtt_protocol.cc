@@ -281,17 +281,29 @@ bool MqttProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     session_id_ = "";
-    xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
-    auto message = GetHelloMessage();
-    if (!SendText(message)) {
-        return false;
+    // After a long idle period the broker connection can be silently dead (the router dropped it
+    // but the client still reports connected), so the hello goes nowhere. On a timeout, reconnect
+    // once and resend before reporting the error.
+    bool received_hello = false;
+    for (int attempt = 1; attempt <= 2 && !received_hello; ++attempt) {
+        if (attempt > 1) {
+            ESP_LOGW(TAG, "No server hello, reconnecting MQTT and retrying");
+            if (!StartMqttClient(true)) {
+                return false;
+            }
+            error_occurred_ = false;
+        }
+        xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
+        if (!SendText(GetHelloMessage())) {
+            return false;
+        }
+        EventBits_t bits =
+            xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE,
+                                pdFALSE, pdMS_TO_TICKS(10000));
+        received_hello = (bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT) != 0;
     }
-
-    // 等待服务器响应
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT,
-                                           pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
-    if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
+    if (!received_hello) {
         ESP_LOGE(TAG, "Failed to receive server hello");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
