@@ -39,11 +39,11 @@ Basada en XiaoZhi 2.5.3. Placa: `bread-compact-esp32` (128x64).
 - Falta de memoria al enviar la lista de herramientas al servidor (descripciones más cortas,
   páginas más pequeñas y una sola herramienta de pomodoro).
 
-## [0.3.0] - 2026-11-09 (`1a615b9`, "mejoras")
+## [0.3.0] - 2026-11-09 (`sofia-v0.3.0`, "mejoras")
 - Ajustes de la vinculación por QR, de la pantalla y de la documentación.
 
-## [0.2.0] - 2026-11-06 (`97f5f89`)
+## [0.2.0] - 2026-11-06 (`sofia-v0.2.0`)
 - Puente de música por BLE con la app Android y configuración Wi-Fi por QR.
 
-## [0.1.0] - 2026-11-06 (`1f925e4`)
+## [0.1.0] - 2026-11-06 (`sofia-v0.1.0`)
 - Ojos reactivos en la OLED, configuración Wi-Fi en dos fases y README del proyecto.
