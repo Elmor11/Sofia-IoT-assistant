@@ -120,6 +120,25 @@ TelegramBot& TelegramBot::GetInstance() {
 bool TelegramBot::Start() {
     SemaphoreHandle_t lifecycle_mutex = GetLifecycleMutex();
     xSemaphoreTake(lifecycle_mutex, portMAX_DELAY);
+    if (task_ == nullptr) {
+        running_.store(true);
+        const BaseType_t created = xTaskCreate(TaskEntry, "telegram_bot", kTaskStackSize, this,
+                                               kTaskPriority, &task_);
+        if (created != pdPASS) {
+            running_.store(false);
+            task_ = nullptr;
+        }
+        xSemaphoreGive(lifecycle_mutex);
+
+        if (created != pdPASS) {
+            ESP_LOGE(kTag, "No se pudo crear la tarea de Telegram");
+            return false;
+        }
+
+        ESP_LOGI(kTag, "Modulo Telegram iniciado");
+        return true;
+    }
+
     if (running_.load()) {
         xSemaphoreGive(lifecycle_mutex);
         ESP_LOGW(kTag, "El bot ya esta iniciado");
@@ -127,52 +146,24 @@ bool TelegramBot::Start() {
     }
 
     running_.store(true);
-    last_update_id_ = 0;
-    const BaseType_t created = xTaskCreate(TaskEntry, "telegram_bot", kTaskStackSize, this,
-                                           kTaskPriority, &task_);
-    if (created != pdPASS) {
-        running_.store(false);
-        task_ = nullptr;
-    }
+    xTaskNotifyGive(task_);
     xSemaphoreGive(lifecycle_mutex);
 
-    if (created != pdPASS) {
-        ESP_LOGE(kTag, "No se pudo crear la tarea de Telegram");
-        return false;
-    }
-
-    ESP_LOGI(kTag, "Modulo Telegram iniciado");
+    ESP_LOGI(kTag, "Modulo Telegram reanudado");
     return true;
 }
 
 void TelegramBot::Stop() {
     SemaphoreHandle_t lifecycle_mutex = GetLifecycleMutex();
     xSemaphoreTake(lifecycle_mutex, portMAX_DELAY);
-    if (!running_.load()) {
-        xSemaphoreGive(lifecycle_mutex);
-        return;
-    }
-
-    running_.store(false);
-    const TaskHandle_t task = task_;
+    const bool running = running_.exchange(false);
     xSemaphoreGive(lifecycle_mutex);
 
-    if (task == xTaskGetCurrentTaskHandle()) {
-        ESP_LOGW(kTag, "La tarea de Telegram no puede detenerse a si misma");
+    if (!running) {
         return;
     }
 
-    while (true) {
-        xSemaphoreTake(lifecycle_mutex, portMAX_DELAY);
-        const bool stopped = task_ == nullptr;
-        xSemaphoreGive(lifecycle_mutex);
-        if (stopped) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    ESP_LOGI(kTag, "Modulo Telegram detenido");
+    ESP_LOGI(kTag, "Detencion del modulo Telegram solicitada");
 }
 
 bool TelegramBot::IsRunning() const {
@@ -181,13 +172,22 @@ bool TelegramBot::IsRunning() const {
 
 void TelegramBot::TaskEntry(void* parameter) {
     auto* bot = static_cast<TelegramBot*>(parameter);
-    bot->Run();
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, 0);
+        bot->Run();
 
-    SemaphoreHandle_t lifecycle_mutex = GetLifecycleMutex();
-    xSemaphoreTake(lifecycle_mutex, portMAX_DELAY);
-    bot->task_ = nullptr;
-    xSemaphoreGive(lifecycle_mutex);
-    vTaskDelete(nullptr);
+        SemaphoreHandle_t lifecycle_mutex = GetLifecycleMutex();
+        xSemaphoreTake(lifecycle_mutex, portMAX_DELAY);
+        const bool restarted = bot->running_.load();
+        xSemaphoreGive(lifecycle_mutex);
+
+        if (restarted) {
+            ulTaskNotifyTake(pdTRUE, 0);
+            continue;
+        }
+
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
 }
 
 void TelegramBot::Run() {
