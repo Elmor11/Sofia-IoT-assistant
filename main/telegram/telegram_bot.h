@@ -2,37 +2,39 @@
 #ifndef TELEGRAM_BOT_H
 #define TELEGRAM_BOT_H
 
+#include <atomic>
 #include <string>
 #include <cstdint>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 class TelegramBot {
 public:
-    // Obtener instancia unica
     static TelegramBot& GetInstance();
 
-    // Iniciar el modulo de Telegram
     bool Start();
-
-    // Detener el modulo
     void Stop();
-
-    // Consultar estado del bot
     bool IsRunning() const;
 
-private:
     TelegramBot() = default;
 
-    // Evitar copias de la instancia
     TelegramBot(const TelegramBot&) = delete;
     TelegramBot& operator=(const TelegramBot&) = delete;
 
-    // Procesar comandos recibidos
+    // Tarea independiente de Telegram
+    static void TaskEntry(void* parameter);
+    void Run();
+
+    // Procesamiento de comandos
     std::string ProcessCommand(
         const std::string& command
     );
 
     // Estado interno
-    bool running_ = false;
+    std::atomic<bool> running_{false};
+    TaskHandle_t task_ = nullptr;
+    int64_t last_update_id_ = 0;
 };
 
 #endif
