@@ -14,9 +14,15 @@
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/semphr.h"
+
+#ifndef SOFIA_TELEGRAM_MEMORY_DIAGNOSTICS
+#define SOFIA_TELEGRAM_MEMORY_DIAGNOSTICS 1
+#endif
 
 namespace {
 
@@ -29,6 +35,33 @@ constexpr UBaseType_t kTaskPriority = 3;
 constexpr size_t kMaxPendingResponses = 4;
 constexpr size_t kMaxTelegramResponseBytes = 1024;
 constexpr size_t kMaxResponsesPerPoll = 2;
+constexpr uint8_t kMaxPendingPomodoroRequests = 2;
+
+#if SOFIA_TELEGRAM_MEMORY_DIAGNOSTICS
+constexpr TickType_t kMemoryLogInterval = pdMS_TO_TICKS(60000);
+
+void LogTelegramMemory(const char* checkpoint) {
+    ESP_LOGI("TelegramMemory",
+             "%s free=%u min_free=%u largest_8bit=%u stack_hwm_words=%u",
+             checkpoint, static_cast<unsigned>(esp_get_free_heap_size()),
+             static_cast<unsigned>(esp_get_minimum_free_heap_size()),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+}
+
+bool ShouldSampleHttpsMemory() {
+    static TickType_t last_sample = 0;
+    const TickType_t now = xTaskGetTickCount();
+    if (last_sample != 0 && now - last_sample < kMemoryLogInterval) {
+        return false;
+    }
+    last_sample = now;
+    return true;
+}
+#else
+void LogTelegramMemory(const char*) {}
+bool ShouldSampleHttpsMemory() { return false; }
+#endif
 
 StaticSemaphore_t s_lifecycle_mutex_storage;
 SemaphoreHandle_t s_lifecycle_mutex = nullptr;
@@ -57,6 +90,11 @@ esp_err_t HttpEventHandler(esp_http_client_event_t* event) {
 
 bool PerformRequest(const std::string& url, esp_http_client_method_t method,
                     const char* payload, HttpResponse* response) {
+    const bool log_memory = ShouldSampleHttpsMemory();
+    if (log_memory) {
+        LogTelegramMemory("before_https");
+    }
+
     esp_http_client_config_t config = {};
     config.url = url.c_str();
     config.timeout_ms = kHttpTimeoutMs;
@@ -67,6 +105,9 @@ bool PerformRequest(const std::string& url, esp_http_client_method_t method,
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
         ESP_LOGE(kTag, "No se pudo crear el cliente HTTP");
+        if (log_memory) {
+            LogTelegramMemory("after_https");
+        }
         return false;
     }
 
@@ -79,6 +120,9 @@ bool PerformRequest(const std::string& url, esp_http_client_method_t method,
     const esp_err_t result = esp_http_client_perform(client);
     const int status_code = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
+    if (log_memory) {
+        LogTelegramMemory("after_https");
+    }
 
     if (response->too_large) {
         ESP_LOGW(kTag, "Respuesta de Telegram demasiado grande");
@@ -282,6 +326,7 @@ bool TelegramBot::PopResponse(std::string* response) {
 
 void TelegramBot::TaskEntry(void* parameter) {
     auto* bot = static_cast<TelegramBot*>(parameter);
+    LogTelegramMemory("task_started");
     while (true) {
         ulTaskNotifyTake(pdTRUE, 0);
         bot->Run();
@@ -296,6 +341,7 @@ void TelegramBot::TaskEntry(void* parameter) {
             continue;
         }
 
+        LogTelegramMemory("task_stopped");
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
@@ -416,8 +462,19 @@ std::string TelegramBot::ProcessCommand(const std::string& command) {
     }
 
     if (!pomodoro_action.empty()) {
+        uint8_t pending = pending_pomodoro_requests_.load(std::memory_order_relaxed);
+        while (pending < kMaxPendingPomodoroRequests &&
+               !pending_pomodoro_requests_.compare_exchange_weak(
+                   pending, static_cast<uint8_t>(pending + 1), std::memory_order_acq_rel,
+                   std::memory_order_relaxed)) {
+        }
+        if (pending >= kMaxPendingPomodoroRequests) {
+            return "Pomodoro esta ocupado. Intentalo de nuevo en unos segundos.";
+        }
+
         Application::GetInstance().Schedule([this, action = std::move(pomodoro_action)]() {
             const auto result = Pomodoro::GetInstance().ExecuteAction(action);
+            pending_pomodoro_requests_.fetch_sub(1, std::memory_order_release);
             QueueResponse(result.success ? FormatPomodoroStatus(result.status)
                                          : "Pomodoro: " + result.status);
         });

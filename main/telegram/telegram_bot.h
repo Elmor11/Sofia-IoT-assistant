@@ -37,6 +37,7 @@ public:
     std::atomic<bool> running_{false};
     TaskHandle_t task_ = nullptr;
     int64_t last_update_id_ = 0;
+    std::atomic<uint8_t> pending_pomodoro_requests_{0};
     std::mutex response_mutex_;
     std::deque<std::string> pending_responses_;
 
