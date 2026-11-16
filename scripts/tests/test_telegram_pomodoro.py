@@ -232,5 +232,209 @@ class TelegramPomodoroTests(unittest.TestCase):
         self.run_scenario("quota")
 
 
+@unittest.skipUnless(find_compiler(), "requires a C++17 host compiler")
+class TelegramJsonProcessingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.compiler = find_compiler()
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        build_dir = pathlib.Path(cls.tmp.name)
+        source = TELEGRAM_SOURCE.read_text(encoding="utf-8")
+        chat_id_to_string = extract_function(source, "std::string ChatIdToString")
+        process_updates = extract_function(source, "bool ProcessUpdatesResponse")
+        http_response = extract_function(source, "struct HttpResponse") + ";"
+        http_event_handler = extract_function(source, "esp_err_t HttpEventHandler")
+        driver = build_dir / "telegram_json_driver.cc"
+        driver.write_text(textwrap.dedent(r'''
+            #include <atomic>
+            #include <cassert>
+            #include <cstdio>
+            #include <cstdint>
+            #include <memory>
+            #include <string>
+            #include <vector>
+
+            #include <cjson/cJSON.h>
+
+            #define ESP_LOGW(...) do {} while (false)
+
+            using esp_err_t = int;
+            constexpr esp_err_t ESP_OK = 0;
+            constexpr esp_err_t ESP_FAIL = -1;
+            constexpr size_t kMaxHttpResponseBytes = 16 * 1024;
+
+            enum esp_http_client_event_id_t {
+                HTTP_EVENT_ERROR,
+                HTTP_EVENT_ON_DATA,
+            };
+
+            struct esp_http_client_event_t {
+                esp_http_client_event_id_t event_id;
+                void* user_data;
+                void* data;
+                int data_len;
+            };
+
+            class TelegramBot {
+            public:
+                std::atomic<bool> running_{true};
+                int64_t last_update_id_ = 0;
+                std::vector<std::string> commands;
+                int scheduled_pomodoro_operations = 0;
+
+                std::string ProcessCommand(const std::string& command) {
+                    commands.push_back(command);
+                    if (command.rfind("/pomodoro ", 0) == 0) {
+                        ++scheduled_pomodoro_operations;
+                        return {};
+                    }
+                    return "reply:" + command;
+                }
+            };
+
+            std::vector<std::string> sent_messages;
+
+            bool SendMessage(const std::string&, const std::string&, const std::string& message) {
+                sent_messages.push_back(message);
+                return true;
+            }
+        ''') + "\n" + http_response + "\n" + http_event_handler + "\n" +
+                          chat_id_to_string + "\n" + process_updates + textwrap.dedent(r'''
+            void Reset() {
+                sent_messages.clear();
+            }
+
+            bool Process(TelegramBot& bot, const std::string& json) {
+                return ProcessUpdatesResponse(bot, json, "https://example.invalid/", "9001");
+            }
+
+            int main(int argc, char** argv) {
+                assert(argc == 2);
+                const std::string scenario = argv[1];
+                TelegramBot bot;
+                Reset();
+
+                if (scenario == "authorized") {
+                    assert(Process(bot,
+                        R"({"ok":true,"result":[{"update_id":101,"message":{"chat":{"id":9001},"text":"/pomodoro iniciar"}}]})"));
+                    assert(bot.commands == std::vector<std::string>{"/pomodoro iniciar"});
+                    assert(bot.scheduled_pomodoro_operations == 1);
+                    assert(bot.last_update_id_ == 101);
+                    assert(sent_messages.empty());
+                    return 0;
+                }
+                if (scenario == "unauthorized") {
+                    assert(Process(bot,
+                        R"({"ok":true,"result":[{"update_id":102,"message":{"chat":{"id":9999},"text":"/pomodoro iniciar"}}]})"));
+                    assert(bot.commands.empty());
+                    assert(bot.scheduled_pomodoro_operations == 0);
+                    assert(bot.last_update_id_ == 102);
+                    assert(sent_messages.empty());
+                    return 0;
+                }
+                if (scenario == "invalid_response") {
+                    assert(!Process(bot, R"({"ok":true,"result":[)"));
+                    assert(!Process(bot, R"({"ok":false,"result":[]})"));
+                    assert(!Process(bot, R"({"ok":true})"));
+                    assert(!Process(bot, R"({"ok":true,"result":{}})"));
+                    assert(bot.commands.empty());
+                    assert(bot.last_update_id_ == 0);
+                    return 0;
+                }
+                if (scenario == "malformed_updates") {
+                    assert(Process(bot, R"({"ok":true,"result":[
+                        {},
+                        {"update_id":"11","message":{"chat":{"id":9001},"text":"/start"}},
+                        {"update_id":12},
+                        {"update_id":13,"message":{}},
+                        {"update_id":14,"message":{"chat":{"id":"9001"},"text":"/start"}},
+                        {"update_id":15,"message":{"chat":{"id":9001},"text":42}}
+                    ]})"));
+                    assert(bot.commands.empty());
+                    assert(bot.scheduled_pomodoro_operations == 0);
+                    assert(bot.last_update_id_ == 15);
+                    assert(sent_messages.empty());
+                    return 0;
+                }
+                if (scenario == "duplicates_and_offset") {
+                    bot.last_update_id_ = 30;
+                    assert(Process(bot, R"({"ok":true,"result":[
+                        {"update_id":30,"message":{"chat":{"id":9001},"text":"/start"}},
+                        {"update_id":31,"message":{"chat":{"id":9999},"text":"/pomodoro iniciar"}},
+                        {"update_id":32,"message":{"chat":{"id":9001},"text":"/estado"}},
+                        {"update_id":32,"message":{"chat":{"id":9001},"text":"/pomodoro iniciar"}}
+                    ]})"));
+                    assert(bot.commands == std::vector<std::string>{"/estado"});
+                    assert(bot.scheduled_pomodoro_operations == 0);
+                    assert(bot.last_update_id_ == 32);
+                    assert(sent_messages == std::vector<std::string>{"reply:/estado"});
+                    return 0;
+                }
+                if (scenario == "response_limit") {
+                    HttpResponse response;
+                    std::string chunk(kMaxHttpResponseBytes, 'x');
+                    esp_http_client_event_t event = {
+                        HTTP_EVENT_ON_DATA, &response, chunk.data(), static_cast<int>(chunk.size())
+                    };
+                    assert(HttpEventHandler(&event) == ESP_OK);
+                    assert(response.body.size() == kMaxHttpResponseBytes);
+                    event.data = chunk.data();
+                    event.data_len = 1;
+                    assert(HttpEventHandler(&event) == ESP_FAIL);
+                    assert(response.too_large);
+                    return 0;
+                }
+                return 1;
+            }
+        '''), encoding="utf-8")
+
+        cls.executable = build_dir / "telegram_json_host_test"
+        if cls.compiler[0].lower() == "cl":
+            raise unittest.SkipTest("the JSON harness currently requires a GCC-compatible cJSON library")
+        command = cls.compiler + [
+            "-std=c++17", "-fno-exceptions", str(driver),
+            "-IC:\\msys64\\ucrt64\\include",
+            "-LC:\\msys64\\ucrt64\\lib", "-lcjson",
+            "-o", str(cls.executable),
+        ]
+        compilation_env = os.environ.copy()
+        compiler_directory = str(pathlib.Path(cls.compiler[0]).parent)
+        compilation_env["PATH"] = compiler_directory + os.pathsep + compilation_env["PATH"]
+        cls.execution_env = compilation_env
+        compilation = subprocess.run(command, capture_output=True, text=True, env=compilation_env)
+        if compilation.returncode:
+            raise RuntimeError(
+                "Failed to compile Telegram JSON host harness.\n"
+                f"Command: {shlex.join(command)}\n"
+                f"stdout:\n{compilation.stdout}\n"
+                f"stderr:\n{compilation.stderr}"
+            )
+
+    def run_scenario(self, scenario):
+        command = [str(self.executable), scenario]
+        result = subprocess.run(command, capture_output=True, text=True, env=self.execution_env)
+        if result.returncode:
+            self.fail(
+                "Telegram JSON host scenario failed.\n"
+                f"Command: {shlex.join(command)}\n"
+                f"exit code: {result.returncode}\n"
+                f"stdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+
+    def test_authorized_and_unauthorized_chat_ids(self):
+        self.run_scenario("authorized")
+        self.run_scenario("unauthorized")
+
+    def test_invalid_or_incomplete_get_updates_responses(self):
+        self.run_scenario("invalid_response")
+        self.run_scenario("malformed_updates")
+
+    def test_duplicate_updates_maintain_offset_and_http_limit(self):
+        self.run_scenario("duplicates_and_offset")
+        self.run_scenario("response_limit")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -183,6 +183,56 @@ std::string ChatIdToString(const cJSON* chat_id) {
     return value;
 }
 
+bool ProcessUpdatesResponse(TelegramBot& bot, const std::string& response_body,
+                            const std::string& api_base,
+                            const std::string& authorized_chat_id) {
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(response_body.c_str(), response_body.size()), cJSON_Delete);
+    const cJSON* ok = root == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(root.get(), "ok");
+    const cJSON* updates =
+        root == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(root.get(), "result");
+    if (!cJSON_IsTrue(ok) || !cJSON_IsArray(updates)) {
+        ESP_LOGW(kTag, "Respuesta getUpdates invalida");
+        return false;
+    }
+
+    const cJSON* update = nullptr;
+    cJSON_ArrayForEach(update, updates) {
+        if (!bot.running_.load()) {
+            break;
+        }
+
+        const cJSON* update_id = cJSON_GetObjectItemCaseSensitive(update, "update_id");
+        if (!cJSON_IsNumber(update_id)) {
+            continue;
+        }
+
+        const int64_t current_update_id = static_cast<int64_t>(update_id->valuedouble);
+        if (current_update_id <= bot.last_update_id_) {
+            continue;
+        }
+        bot.last_update_id_ = current_update_id;
+
+        const cJSON* message = cJSON_GetObjectItemCaseSensitive(update, "message");
+        const cJSON* chat =
+            message == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(message, "chat");
+        const cJSON* chat_id =
+            chat == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(chat, "id");
+        const cJSON* text =
+            message == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(message, "text");
+        if (!cJSON_IsString(text) || ChatIdToString(chat_id) != authorized_chat_id) {
+            continue;
+        }
+
+        const std::string reply = bot.ProcessCommand(text->valuestring);
+        if (!reply.empty() && !SendMessage(api_base, authorized_chat_id, reply)) {
+            ESP_LOGW(kTag, "No se pudo enviar la respuesta de Telegram");
+        }
+    }
+
+    return true;
+}
+
 int JsonInt(const cJSON* object, const char* name, int default_value) {
     const cJSON* value = cJSON_GetObjectItemCaseSensitive(object, name);
     return cJSON_IsNumber(value) ? value->valueint : default_value;
@@ -376,48 +426,9 @@ void TelegramBot::Run() {
             continue;
         }
 
-        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
-            cJSON_ParseWithLength(response.body.c_str(), response.body.size()), cJSON_Delete);
-        const cJSON* ok = root == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(root.get(), "ok");
-        const cJSON* updates = root == nullptr ? nullptr : cJSON_GetObjectItemCaseSensitive(root.get(), "result");
-        if (!cJSON_IsTrue(ok) || !cJSON_IsArray(updates)) {
-            ESP_LOGW(kTag, "Respuesta getUpdates invalida");
+        if (!ProcessUpdatesResponse(*this, response.body, api_base, authorized_chat_id)) {
             vTaskDelay(kPollInterval);
             continue;
-        }
-
-        const cJSON* update = nullptr;
-        cJSON_ArrayForEach(update, updates) {
-            if (!running_.load()) {
-                break;
-            }
-
-            const cJSON* update_id = cJSON_GetObjectItemCaseSensitive(update, "update_id");
-            if (!cJSON_IsNumber(update_id)) {
-                continue;
-            }
-
-            const int64_t current_update_id = static_cast<int64_t>(update_id->valuedouble);
-            if (current_update_id <= last_update_id_) {
-                continue;
-            }
-            last_update_id_ = current_update_id;
-
-            const cJSON* message = cJSON_GetObjectItemCaseSensitive(update, "message");
-            const cJSON* chat = message == nullptr ? nullptr :
-                cJSON_GetObjectItemCaseSensitive(message, "chat");
-            const cJSON* chat_id = chat == nullptr ? nullptr :
-                cJSON_GetObjectItemCaseSensitive(chat, "id");
-            const cJSON* text = message == nullptr ? nullptr :
-                cJSON_GetObjectItemCaseSensitive(message, "text");
-            if (!cJSON_IsString(text) || ChatIdToString(chat_id) != authorized_chat_id) {
-                continue;
-            }
-
-            const std::string reply = ProcessCommand(text->valuestring);
-            if (!reply.empty() && !SendMessage(api_base, authorized_chat_id, reply)) {
-                ESP_LOGW(kTag, "No se pudo enviar la respuesta de Telegram");
-            }
         }
     }
 }
