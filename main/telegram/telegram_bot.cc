@@ -1,16 +1,22 @@
 #include "telegram_bot.h"
 
+#include "application.h"
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+
+#include "sdkconfig.h"
+
+#if CONFIG_POMODORO_TIMER
+#include "pomodoro/pomodoro.h"
+#endif
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/semphr.h"
-#include "sdkconfig.h"
 
 namespace {
 
@@ -20,6 +26,9 @@ constexpr TickType_t kPollInterval = pdMS_TO_TICKS(1000);
 constexpr int kHttpTimeoutMs = 15000;
 constexpr uint32_t kTaskStackSize = 6144;
 constexpr UBaseType_t kTaskPriority = 3;
+constexpr size_t kMaxPendingResponses = 4;
+constexpr size_t kMaxTelegramResponseBytes = 1024;
+constexpr size_t kMaxResponsesPerPoll = 2;
 
 StaticSemaphore_t s_lifecycle_mutex_storage;
 SemaphoreHandle_t s_lifecycle_mutex = nullptr;
@@ -83,6 +92,36 @@ bool PerformRequest(const std::string& url, esp_http_client_method_t method,
     return true;
 }
 
+bool IsSuccessfulTelegramResponse(const std::string& response);
+
+bool SendMessage(const std::string& api_base, const std::string& chat_id,
+                 const std::string& message) {
+    cJSON* payload = cJSON_CreateObject();
+    if (payload == nullptr) {
+        ESP_LOGE(kTag, "No se pudo crear la respuesta de Telegram");
+        return false;
+    }
+    if (cJSON_AddStringToObject(payload, "chat_id", chat_id.c_str()) == nullptr ||
+        cJSON_AddStringToObject(payload, "text", message.c_str()) == nullptr) {
+        cJSON_Delete(payload);
+        ESP_LOGE(kTag, "No se pudo crear la respuesta de Telegram");
+        return false;
+    }
+
+    char* serialized_payload = cJSON_PrintUnformatted(payload);
+    cJSON_Delete(payload);
+    if (serialized_payload == nullptr) {
+        ESP_LOGE(kTag, "No se pudo serializar la respuesta de Telegram");
+        return false;
+    }
+
+    HttpResponse response;
+    const bool sent =
+        PerformRequest(api_base + "sendMessage", HTTP_METHOD_POST, serialized_payload, &response);
+    cJSON_free(serialized_payload);
+    return sent && IsSuccessfulTelegramResponse(response.body);
+}
+
 bool IsSuccessfulTelegramResponse(const std::string& response) {
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
         cJSON_ParseWithLength(response.c_str(), response.size()), cJSON_Delete);
@@ -98,6 +137,54 @@ std::string ChatIdToString(const cJSON* chat_id) {
     char value[24];
     std::snprintf(value, sizeof(value), "%.0f", chat_id->valuedouble);
     return value;
+}
+
+int JsonInt(const cJSON* object, const char* name, int default_value) {
+    const cJSON* value = cJSON_GetObjectItemCaseSensitive(object, name);
+    return cJSON_IsNumber(value) ? value->valueint : default_value;
+}
+
+std::string FormatPomodoroStatus(const std::string& status) {
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(status.c_str(), status.size()), cJSON_Delete);
+    if (root == nullptr) {
+        return "No se pudo obtener el estado de Pomodoro.";
+    }
+
+    const cJSON* phase = cJSON_GetObjectItemCaseSensitive(root.get(), "phase");
+    if (!cJSON_IsString(phase)) {
+        return "No se pudo obtener el estado de Pomodoro.";
+    }
+
+    const char* phase_name = phase->valuestring;
+    if (strcmp(phase_name, "off") == 0) {
+        return "Pomodoro detenido.\nEstudio hoy: " +
+               std::to_string(JsonInt(root.get(), "today_min", 0)) + " min.";
+    }
+
+    const char* translated_phase = strcmp(phase_name, "focus") == 0
+                                       ? "estudio"
+                                       : strcmp(phase_name, "short_break") == 0
+                                             ? "descanso corto"
+                                             : "descanso largo";
+    const int left_seconds = JsonInt(root.get(), "left_s", 0);
+    const int round = JsonInt(root.get(), "round", 0);
+    const int rounds = JsonInt(root.get(), "rounds", 0);
+    const bool paused = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root.get(), "paused"));
+
+    char remaining[16];
+    std::snprintf(remaining, sizeof(remaining), "%d:%02d", left_seconds / 60,
+                  left_seconds % 60);
+    std::string result = "Pomodoro: ";
+    result += translated_phase;
+    if (paused) {
+        result += " (en pausa)";
+    }
+    result += "\nRonda: " + std::to_string(round) + "/" + std::to_string(rounds);
+    result += "\nRestante: ";
+    result += remaining;
+    result += "\nEstudio hoy: " + std::to_string(JsonInt(root.get(), "today_min", 0)) + " min.";
+    return result;
 }
 
 SemaphoreHandle_t GetLifecycleMutex() {
@@ -170,6 +257,29 @@ bool TelegramBot::IsRunning() const {
     return running_.load();
 }
 
+void TelegramBot::QueueResponse(std::string response) {
+    if (response.size() > kMaxTelegramResponseBytes) {
+        response.resize(kMaxTelegramResponseBytes);
+    }
+
+    std::lock_guard<std::mutex> lock(response_mutex_);
+    if (pending_responses_.size() == kMaxPendingResponses) {
+        ESP_LOGW(kTag, "Cola de respuestas de Telegram llena");
+        return;
+    }
+    pending_responses_.push_back(std::move(response));
+}
+
+bool TelegramBot::PopResponse(std::string* response) {
+    std::lock_guard<std::mutex> lock(response_mutex_);
+    if (pending_responses_.empty()) {
+        return false;
+    }
+    *response = std::move(pending_responses_.front());
+    pending_responses_.pop_front();
+    return true;
+}
+
 void TelegramBot::TaskEntry(void* parameter) {
     auto* bot = static_cast<TelegramBot*>(parameter);
     while (true) {
@@ -200,6 +310,16 @@ void TelegramBot::Run() {
 
     const std::string api_base = "https://api.telegram.org/bot" + token + "/";
     while (running_.load()) {
+        for (size_t i = 0; i < kMaxResponsesPerPoll; ++i) {
+            std::string response;
+            if (!PopResponse(&response)) {
+                break;
+            }
+            if (!SendMessage(api_base, authorized_chat_id, response)) {
+                ESP_LOGW(kTag, "No se pudo enviar la respuesta de Telegram");
+            }
+        }
+
         HttpResponse response;
         const std::string url = api_base + "getUpdates?timeout=10&offset=" +
                                 std::to_string(last_update_id_ + 1);
@@ -249,29 +369,7 @@ void TelegramBot::Run() {
             }
 
             const std::string reply = ProcessCommand(text->valuestring);
-            cJSON* payload = cJSON_CreateObject();
-            if (payload == nullptr) {
-                ESP_LOGE(kTag, "No se pudo crear la respuesta de Telegram");
-                continue;
-            }
-            if (cJSON_AddStringToObject(payload, "chat_id", authorized_chat_id.c_str()) == nullptr ||
-                cJSON_AddStringToObject(payload, "text", reply.c_str()) == nullptr) {
-                cJSON_Delete(payload);
-                ESP_LOGE(kTag, "No se pudo crear la respuesta de Telegram");
-                continue;
-            }
-            char* serialized_payload = cJSON_PrintUnformatted(payload);
-            cJSON_Delete(payload);
-            if (serialized_payload == nullptr) {
-                ESP_LOGE(kTag, "No se pudo serializar la respuesta de Telegram");
-                continue;
-            }
-
-            HttpResponse send_response;
-            const bool sent = PerformRequest(api_base + "sendMessage", HTTP_METHOD_POST,
-                                             serialized_payload, &send_response);
-            cJSON_free(serialized_payload);
-            if (!sent || !IsSuccessfulTelegramResponse(send_response.body)) {
+            if (!reply.empty() && !SendMessage(api_base, authorized_chat_id, reply)) {
                 ESP_LOGW(kTag, "No se pudo enviar la respuesta de Telegram");
             }
         }
@@ -284,7 +382,8 @@ std::string TelegramBot::ProcessCommand(const std::string& command) {
                "Comandos disponibles:\n"
                "/start\n"
                "/estado\n"
-               "/ayuda";
+               "/ayuda\n"
+               "/pomodoro";
     }
 
     if (command == "/estado") {
@@ -296,8 +395,39 @@ std::string TelegramBot::ProcessCommand(const std::string& command) {
         return "Comandos disponibles:\n"
                "/start\n"
                "/estado\n"
-               "/ayuda";
+               "/ayuda\n"
+               "/pomodoro";
     }
+
+#if CONFIG_POMODORO_TIMER
+    std::string pomodoro_action;
+    if (command == "/pomodoro iniciar") {
+        pomodoro_action = "start";
+    } else if (command == "/pomodoro pausar") {
+        pomodoro_action = "pause";
+    } else if (command == "/pomodoro reanudar") {
+        pomodoro_action = "resume";
+    } else if (command == "/pomodoro detener") {
+        pomodoro_action = "stop";
+    } else if (command == "/pomodoro estado") {
+        pomodoro_action = "status";
+    } else if (command == "/pomodoro" || command.rfind("/pomodoro ", 0) == 0) {
+        return "Usa /pomodoro iniciar, pausar, reanudar, detener o estado.";
+    }
+
+    if (!pomodoro_action.empty()) {
+        Application::GetInstance().Schedule([this, action = std::move(pomodoro_action)]() {
+            const auto result = Pomodoro::GetInstance().ExecuteAction(action);
+            QueueResponse(result.success ? FormatPomodoroStatus(result.status)
+                                         : "Pomodoro: " + result.status);
+        });
+        return {};
+    }
+#else
+    if (command == "/pomodoro" || command.rfind("/pomodoro ", 0) == 0) {
+        return "La funcion Pomodoro no esta disponible.";
+    }
+#endif
 
     return "Comando no reconocido. Usa /ayuda.";
 }
