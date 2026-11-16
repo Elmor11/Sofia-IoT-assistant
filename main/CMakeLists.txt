@@ -44,7 +44,6 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
-            "telegram/telegram_bot.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
@@ -975,6 +974,9 @@ if (CONFIG_POMODORO_TIMER)
     set(POMODORO_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_break.ogg
                         ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_focus.ogg)
 endif ()
+if(CONFIG_SOFIA_TELEGRAM_ENABLED)
+    list(APPEND SOURCES "telegram/telegram_bot.cc")
+endif()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
     set(LANG_DIR "zh-CN")
