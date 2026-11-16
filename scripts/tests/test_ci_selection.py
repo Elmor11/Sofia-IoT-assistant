@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -15,11 +16,22 @@ build = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(build)
 
 
+def find_bash():
+    candidates = ["bash"]
+    if os.name == "nt":
+        candidates.append(r"C:\msys64\usr\bin\bash.exe")
+    for candidate in candidates:
+        executable = shutil.which(candidate)
+        if executable:
+            return executable
+    return None
+
+
 class CiSelectionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.variants = build._collect_variants(idf_version=(6, 1, 0))
-        cls.manifest = json.loads(build._CI_REPRESENTATIVE_VARIANTS.read_text())
+        cls.manifest = json.loads(build._CI_REPRESENTATIVE_VARIANTS.read_text(encoding="utf-8"))
 
     def load_manifest(self, manifest):
         with tempfile.TemporaryDirectory() as directory:
@@ -144,6 +156,9 @@ class WorkflowDiffTests(unittest.TestCase):
     """Exercise the workflow's actual shell against small local Git histories."""
 
     def setUp(self):
+        self.bash = find_bash()
+        if self.bash is None:
+            self.skipTest("requires Bash")
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -159,7 +174,7 @@ class WorkflowDiffTests(unittest.TestCase):
         self.commit_file("README.md")
         self.base = self.git("rev-parse", "HEAD")
         self.git("update-ref", "refs/remotes/origin/main", self.base)
-        workflow = (ROOT / ".github/workflows/build.yml").read_text()
+        workflow = (ROOT / ".github/workflows/build.yml").read_text(encoding="utf-8")
         select = workflow.split("name: Select variants based on changes", 1)[1]
         self.script = textwrap.dedent(select.split("        run: |\n", 1)[1].split("\n  build:", 1)[0])
 
@@ -184,11 +199,14 @@ class WorkflowDiffTests(unittest.TestCase):
             "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(self.root),
             "GIT_CONFIG_GLOBAL": str(self.root / "gitconfig"),
         })
+        if os.name == "nt":
+            bash_directory = str(Path(self.bash).parent)
+            env["PATH"] = bash_directory + os.pathsep + env["PATH"]
         subprocess.run(
-            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.script],
+            [self.bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", self.script],
             cwd=self.root, env=env, capture_output=True, text=True, check=True,
         )
-        return json.loads(output.read_text().removeprefix("variants="))
+        return json.loads(output.read_text(encoding="utf-8").removeprefix("variants="))
 
     def test_normal_push_includes_only_changed_paths(self):
         self.commit_file("main/boards/example/config.h")

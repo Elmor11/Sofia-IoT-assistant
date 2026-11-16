@@ -1,5 +1,6 @@
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -11,8 +12,28 @@ ROOT = Path(__file__).resolve().parents[2]
 DEMUXER = ROOT / "main" / "audio" / "demuxer"
 
 
+def find_compiler():
+    configured = shlex.split(os.environ.get("CXX", ""))
+    candidates = [configured] if configured else []
+    candidates.extend([["c++"], ["g++"], ["clang++"]])
+    if os.name == "nt":
+        candidates.extend([
+            [r"C:\msys64\ucrt64\bin\g++.exe"],
+            [r"C:\msys64\mingw64\bin\g++.exe"],
+        ])
+    for candidate in candidates:
+        executable = shutil.which(candidate[0])
+        if executable:
+            return [executable, *candidate[1:]]
+    return None
+
+
 class OggDemuxerTest(unittest.TestCase):
     def test_zero_length_lace_is_processed_without_more_input(self):
+        compiler = find_compiler()
+        if compiler is None:
+            self.skipTest("requires a host C++20 compiler")
+
         driver = r"""
             #include <algorithm>
             #include <cassert>
@@ -142,7 +163,10 @@ class OggDemuxerTest(unittest.TestCase):
             }
         """
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "scripts" / "tests",
+            prefix=".ogg-demuxer-",
+        ) as directory:
             build_dir = Path(directory)
             (build_dir / "esp_log.h").write_text(
                 "#define ESP_LOGE(...) ((void)0)\n"
@@ -153,7 +177,7 @@ class OggDemuxerTest(unittest.TestCase):
             source = build_dir / "ogg_demuxer_test.cc"
             source.write_text(textwrap.dedent(driver), encoding="utf-8")
             executable = build_dir / "ogg_demuxer_test"
-            command = shlex.split(os.environ.get("CXX", "c++")) + [
+            command = compiler + [
                 "-std=c++20",
                 f"-I{build_dir}",
                 f"-I{DEMUXER}",
@@ -162,8 +186,11 @@ class OggDemuxerTest(unittest.TestCase):
                 "-o",
                 str(executable),
             ]
-            subprocess.run(command, check=True, cwd=build_dir)
-            subprocess.run([executable], check=True, cwd=build_dir)
+            environment = os.environ.copy()
+            compiler_directory = str(Path(compiler[0]).parent)
+            environment["PATH"] = compiler_directory + os.pathsep + environment["PATH"]
+            subprocess.run(command, check=True, cwd=build_dir, env=environment)
+            subprocess.run([executable], check=True, cwd=build_dir, env=environment)
 
 
 if __name__ == "__main__":

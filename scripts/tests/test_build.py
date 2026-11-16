@@ -5,6 +5,7 @@ import contextlib
 import io
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,32 @@ SPEC = importlib.util.spec_from_file_location("build", ROOT / "scripts/build.py"
 build = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(build)
+
+
+@contextlib.contextmanager
+def temporary_directory():
+    directory = tempfile.TemporaryDirectory(
+        dir=ROOT / "scripts" / "tests",
+        prefix=".build-test-",
+    )
+    previous_cwd = Path.cwd()
+    try:
+        yield directory.name
+    finally:
+        try:
+            Path.cwd().relative_to(directory.name)
+        except ValueError:
+            pass
+        else:
+            os.chdir(previous_cwd)
+        for attempt in range(10):
+            try:
+                directory.cleanup()
+                break
+            except PermissionError as error:
+                if os.name != "nt" or error.winerror not in {5, 32} or attempt == 9:
+                    raise
+                time.sleep(0.1)
 
 
 class VersionTests(unittest.TestCase):
@@ -850,7 +877,7 @@ class TargetConfigurationTests(unittest.TestCase):
     def test_configure_build_uses_all_cmake_values_in_one_run(self):
         previous_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with temporary_directory() as temp_dir:
                 os.chdir(temp_dir)
                 Path("sdkconfig").write_text(
                     'CONFIG_IDF_TARGET="esp32s3"\nCONFIG_OLD_VARIANT=y\n',
@@ -895,7 +922,7 @@ class TargetConfigurationTests(unittest.TestCase):
     def test_configure_build_replaces_stale_sdkconfig_backup(self):
         previous_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with temporary_directory() as temp_dir:
                 os.chdir(temp_dir)
                 Path("sdkconfig").write_text(
                     'CONFIG_IDF_TARGET="esp32s3"\n',
@@ -1115,7 +1142,7 @@ class BuildOptionTests(unittest.TestCase):
     def test_configured_build_options_are_verified(self):
         previous_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with temporary_directory() as temp_dir:
                 os.chdir(temp_dir)
                 Path("sdkconfig").write_text(
                     "CONFIG_LANGUAGE_EN_US=y\n",
@@ -1136,7 +1163,7 @@ class BuildOptionTests(unittest.TestCase):
     def test_disabled_build_options_accept_symbols_hidden_by_kconfig(self):
         previous_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with temporary_directory() as temp_dir:
                 os.chdir(temp_dir)
                 Path("sdkconfig").write_text(
                     "CONFIG_SELECTED_STYLE=y\n"
@@ -1855,7 +1882,7 @@ class ZipTests(unittest.TestCase):
     def test_zip_is_always_recreated(self):
         previous_cwd = Path.cwd()
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
+            with temporary_directory() as temp_dir:
                 os.chdir(temp_dir)
                 Path("build").mkdir()
                 Path("build/merged-binary.bin").write_bytes(b"new firmware")
