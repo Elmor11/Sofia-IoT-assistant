@@ -1248,3 +1248,23 @@ menu "TAIJIPAI_S3_CONFIG"
 endmenu
 
 endmenu
+
+
+menu "Sofia Telegram Configuration"
+
+    config SOFIA_TELEGRAM_ENABLED
+        bool "Enable Telegram Bot"
+        default n
+
+    config SOFIA_TELEGRAM_TOKEN
+        string "Telegram Bot Token"
+        default ""
+        depends on SOFIA_TELEGRAM_ENABLED
+
+    config SOFIA_TELEGRAM_CHAT_ID
+        string "Authorized Telegram Chat ID"
+        default ""
+        depends on SOFIA_TELEGRAM_ENABLED
+
+endmenu
+

@@ -974,6 +974,9 @@ if (CONFIG_POMODORO_TIMER)
     set(POMODORO_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_break.ogg
                         ${CMAKE_CURRENT_SOURCE_DIR}/pomodoro/pomodoro_focus.ogg)
 endif ()
+if(CONFIG_SOFIA_TELEGRAM_ENABLED)
+    list(APPEND SOURCES "telegram/telegram_bot.cc")
+endif()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
     set(LANG_DIR "zh-CN")
@@ -1151,6 +1154,8 @@ idf_component_register(SRCS ${SOURCES}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
+                        esp_http_client
+                        esp-tls
                         esp_pm
                         esp_psram
                         esp_netif

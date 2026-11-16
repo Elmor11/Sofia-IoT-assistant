@@ -14,6 +14,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def find_compiler():
+    configured = shlex.split(os.environ.get("CXX", ""))
+    candidates = [configured] if configured else []
+    candidates.extend([["c++"], ["g++"], ["clang++"]])
+    if os.name == "nt":
+        candidates.extend([
+            [r"C:\msys64\ucrt64\bin\g++.exe"],
+            [r"C:\msys64\mingw64\bin\g++.exe"],
+        ])
+    for candidate in candidates:
+        executable = shutil.which(candidate[0])
+        if executable:
+            return [executable, *candidate[1:]]
+    return None
+
+
 def definition(source, signature, occurrence=0):
     start = source.index(signature)
     for _ in range(occurrence):
@@ -28,32 +44,44 @@ def definition(source, signature, occurrence=0):
 
 class StartupWakeWordHintTests(unittest.TestCase):
     def compile_and_run(self, driver):
-        compiler = shlex.split(os.environ.get("CXX", "c++"))
-        if not compiler or shutil.which(compiler[0]) is None:
+        compiler = find_compiler()
+        if compiler is None:
             self.skipTest("requires a host C++23 compiler")
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(
+            dir=ROOT / "scripts" / "tests",
+            prefix=".startup-hint-",
+        ) as directory:
             path = Path(directory)
             source = path / "startup_wake_word_hint.cc"
             source.write_text(driver, encoding="utf-8")
-            executable = path / "startup_wake_word_hint"
+            executable = path / "startup_hint_host_test"
+            environment = os.environ.copy()
+            compiler_directory = str(Path(compiler[0]).parent)
+            environment["PATH"] = compiler_directory + os.pathsep + environment["PATH"]
             compiled = subprocess.run(
                 compiler + ["-std=c++23", str(source), "-o", str(executable)],
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=environment,
             )
             self.assertEqual(compiled.returncode, 0, compiled.stdout + compiled.stderr)
-            result = subprocess.run([str(executable)], capture_output=True, text=True)
+            result = subprocess.run(
+                [str(executable)], capture_output=True, text=True, env=environment
+            )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_startup_hint_is_a_localized_one_time_assistant_message_with_a_five_second_timeout(self):
         locales = ROOT / "main/assets/locales"
-        english = json.loads((locales / "en-US/language.json").read_text())["strings"]["WAKE_WORD_HINT"]
-        chinese = json.loads((locales / "zh-CN/language.json").read_text())["strings"]["WAKE_WORD_HINT"]
+        english = json.loads(
+            (locales / "en-US/language.json").read_text(encoding="utf-8")
+        )["strings"]["WAKE_WORD_HINT"]
+        chinese = json.loads(
+            (locales / "zh-CN/language.json").read_text(encoding="utf-8")
+        )["strings"]["WAKE_WORD_HINT"]
         method = definition(
-            (ROOT / "main/application.cc").read_text(),
+            (ROOT / "main/application.cc").read_text(encoding="utf-8"),
             "void Application::ShowStartupWakeWordHint()",
         )
         hide = definition(
-            (ROOT / "main/application.cc").read_text(),
+            (ROOT / "main/application.cc").read_text(encoding="utf-8"),
             "void Application::HideStartupWakeWordHint()",
         )
         platform = r'''
@@ -348,7 +376,7 @@ class StartupWakeWordHintTests(unittest.TestCase):
             ("wechat_lcd", "lcd_display.cc", 0, wechat_checks),
         ):
             with self.subTest(display=name):
-                source = (ROOT / "main/display" / file).read_text()
+                source = (ROOT / "main/display" / file).read_text(encoding="utf-8")
                 signature = "void " + ("OledDisplay" if name == "oled" else "LcdDisplay") + "::RemoveChatMessage("
                 method = definition(source, signature, occurrence)
                 method = method.replace("OledDisplay::", "TestDisplay::").replace("LcdDisplay::", "TestDisplay::")

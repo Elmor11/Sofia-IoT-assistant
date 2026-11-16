@@ -294,6 +294,43 @@ std::string Pomodoro::StatusJson() {
     return result;
 }
 
+Pomodoro::ActionResult Pomodoro::ExecuteAction(const std::string& action, int focus_minutes,
+                                               int short_break_minutes, int long_break_minutes,
+                                               int rounds) {
+    if (action == "start") {
+        if (phase_ != kPomodoroOff) {
+            Stop();
+        }
+        focus_s_ = focus_minutes * 60;
+        short_s_ = short_break_minutes * 60;
+        long_s_ = long_break_minutes * 60;
+        cycles_ = rounds;
+        cycle_ = 1;
+        EnterPhase(kPomodoroFocus);
+    } else if (action == "status") {
+        // Nothing to change.
+    } else if (phase_ == kPomodoroOff) {
+        return {false, "No pomodoro is running"};
+    } else if (action == "pause") {
+        if (!paused_) {
+            BankStudy();
+            StopRunning();
+            UpdateDisplay();
+        }
+    } else if (action == "resume") {
+        if (paused_) {
+            StartRunning();
+            UpdateDisplay();
+        }
+    } else if (action == "stop") {
+        Stop();
+    } else {
+        return {false, "Unknown action; use start, pause, resume, stop or status"};
+    }
+
+    return {true, StatusJson()};
+}
+
 void Pomodoro::RegisterTools() {
     // One tool for everything: each tool costs memory in the tools/list reply.
     McpServer::GetInstance().AddTool(
@@ -307,37 +344,14 @@ void Pomodoro::RegisterTools() {
                       Property("long_break_minutes", kPropertyTypeInteger, 15, 1, 60),
                       Property("rounds", kPropertyTypeInteger, 4, 1, 12)}),
         [this](const PropertyList& properties) -> ToolResult {
-            std::string action = properties["action"].value<std::string>();
-            if (action == "start") {
-                if (phase_ != kPomodoroOff) {
-                    Stop();
-                }
-                focus_s_ = properties["focus_minutes"].value<int>() * 60;
-                short_s_ = properties["break_minutes"].value<int>() * 60;
-                long_s_ = properties["long_break_minutes"].value<int>() * 60;
-                cycles_ = properties["rounds"].value<int>();
-                cycle_ = 1;
-                EnterPhase(kPomodoroFocus);
-            } else if (action == "status") {
-                // Nothing to change.
-            } else if (phase_ == kPomodoroOff) {
-                return std::unexpected("No pomodoro is running");
-            } else if (action == "pause") {
-                if (!paused_) {
-                    BankStudy();
-                    StopRunning();
-                    UpdateDisplay();
-                }
-            } else if (action == "resume") {
-                if (paused_) {
-                    StartRunning();
-                    UpdateDisplay();
-                }
-            } else if (action == "stop") {
-                Stop();
-            } else {
-                return std::unexpected("Unknown action; use start, pause, resume, stop or status");
+            auto result = ExecuteAction(properties["action"].value<std::string>(),
+                                        properties["focus_minutes"].value<int>(),
+                                        properties["break_minutes"].value<int>(),
+                                        properties["long_break_minutes"].value<int>(),
+                                        properties["rounds"].value<int>());
+            if (!result.success) {
+                return std::unexpected(result.status);
             }
-            return StatusJson();
+            return result.status;
         });
 }

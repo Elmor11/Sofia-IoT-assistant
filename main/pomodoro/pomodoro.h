@@ -14,12 +14,20 @@
 // schedule work onto it.
 class Pomodoro {
 public:
+    struct ActionResult {
+        bool success;
+        std::string status;
+    };
+
     static Pomodoro& GetInstance() {
         static Pomodoro instance;
         return instance;
     }
 
     void RegisterTools();
+    ActionResult ExecuteAction(const std::string& action, int focus_minutes = 25,
+                               int short_break_minutes = 5, int long_break_minutes = 15,
+                               int rounds = 4);
 
 private:
     // Packed so the NVS blob layout is stable; it is persistent data. Bump kVersion when it changes.
