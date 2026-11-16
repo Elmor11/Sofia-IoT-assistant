@@ -149,6 +149,8 @@ private:
     std::function<void(const std::string&)> mcp_broadcast_callback_;
 
     bool has_server_time_ = false;
+    bool telegram_activation_ready_ = false;
+    bool telegram_network_connected_ = false;
     bool startup_completed_ = false;
     bool pending_startup_wake_word_hint_ = false;
     bool aborted_ = false;

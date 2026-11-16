@@ -10,10 +10,12 @@
 #include "settings.h"
 #include "system_info.h"
 #include "text_glyph_payload.h"
+#include "telegram/telegram_bot.h"
 #include "websocket_protocol.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
+#include <sdkconfig.h>
 #include <arpa/inet.h>
 #include <cJSON.h>
 #include <algorithm>
@@ -297,6 +299,7 @@ void Application::Run() {
 
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
+    telegram_network_connected_ = true;
     auto state = GetDeviceState();
 
     if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring) {
@@ -317,12 +320,30 @@ void Application::HandleNetworkConnectedEvent() {
             "activation", 4096 * 2, this, 2, &activation_task_handle_);
     }
 
+#if CONFIG_SOFIA_TELEGRAM_ENABLED
+    if (telegram_activation_ready_ && has_server_time_ && telegram_network_connected_) {
+        auto& telegram = TelegramBot::GetInstance();
+        if (!telegram.IsRunning()) {
+            telegram.Start();
+        }
+    }
+#endif
+
     // Update the status bar immediately to show the network state
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    telegram_network_connected_ = false;
+
+#if CONFIG_SOFIA_TELEGRAM_ENABLED
+    auto& telegram = TelegramBot::GetInstance();
+    if (telegram.IsRunning()) {
+        telegram.Stop();
+    }
+#endif
+
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateNotifying) {
@@ -351,6 +372,13 @@ void Application::HandleActivationDoneEvent() {
     // that alert with the "ready" UI/sound — the main loop can process both
     // events back-to-back because the activation task is lower priority.
     const bool has_error = !last_error_message_.empty();
+    telegram_activation_ready_ = !has_error && has_server_time_;
+#if CONFIG_SOFIA_TELEGRAM_ENABLED
+    if (telegram_activation_ready_ && has_server_time_ && telegram_network_connected_) {
+        TelegramBot::GetInstance().Start();
+    }
+#endif
+
     if (!startup_completed_) {
         startup_completed_ = true;
         pending_startup_wake_word_hint_ = !has_error;
